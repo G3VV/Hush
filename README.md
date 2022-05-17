@@ -1,4 +1,3 @@
-# Hush
-Game Engine
+# **Hush**
 --------------------------
 Coming soon
