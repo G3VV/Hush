@@ -23,6 +23,13 @@
   --bat-mid:  #c98500;
   --bat-low:  #d03b3b;
 
+  /* Mode identity. Buses take the aqua slot; trains are achromatic so they
+     cannot collide with the battery hues. */
+  --bus-body:   #199e70;
+  --train-body: #f2f2f5;
+  --train-edge: #17171b;
+  --halo:       #0d0d0d;
+
   --radius: 12px;
   --shadow: 0 8px 28px rgba(0,0,0,.45);
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -48,6 +55,11 @@
   --bat-high: #2a78d6;
   --bat-mid:  #eda100;
   --bat-low:  #d03b3b;
+
+  --bus-body:   #1baf7a;
+  --train-body: #1c1c20;
+  --train-edge: #ffffff;
+  --halo:       #ffffff;
 
   --shadow: 0 8px 28px rgba(0,0,0,.12);
 }
@@ -170,16 +182,19 @@ input[type=range] { width: 100%; accent-color: var(--series-1); }
 
 .bus-arrow {
   width: 0; height: 0;
-  border-left: 6px solid transparent;
-  border-right: 6px solid transparent;
-  border-bottom: 13px solid var(--series-3);
-  filter: drop-shadow(0 0 1.5px var(--surface-1));
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-bottom: 15px solid var(--bus-body);
+  /* A halo separates buses from the dense scooter field underneath. */
+  filter: drop-shadow(0 0 2px var(--halo)) drop-shadow(0 1px 2px rgba(0,0,0,.5));
   transform-origin: 50% 65%;
 }
 .bus-dot {
-  width: 11px; height: 11px; border-radius: 50%;
-  border: 2px solid var(--surface-1);
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--bus-body);
+  border: 2.5px solid var(--halo);
   box-sizing: border-box;
+  box-shadow: 0 1px 3px rgba(0,0,0,.5);
 }
 
 .infra-mark {
@@ -187,29 +202,37 @@ input[type=range] { width: 100%; accent-color: var(--series-1); }
   background: var(--surface-1);
   border: 2px solid var(--text-secondary);
 }
-.infra-mark.is-rail { width: 11px; height: 11px; border-radius: 2px; }
+.infra-mark.is-rail { width: 12px; height: 12px; border-radius: 3px; }
 .infra-mark.is-small {
   width: 7px; height: 7px; border-radius: 1px;
   border-width: 1.5px; border-color: var(--text-muted);
 }
 
-/* Trains: a carriage-like bar, distinct from the bus arrow, because these are
-   estimated positions rather than reported ones. */
+/* Trains are ACHROMATIC on purpose. Four saturated hues are already in play
+   (three battery states plus the bus aqua), and a fifth cannot be separated
+   from them: magenta measures ΔE 9.0 against the low-battery red and 1.6
+   against the bus aqua under deuteranopia. An achromatic body collides with
+   nothing, and trains are the largest, rarest mark so they read first.
+   The long axis runs vertically so rotate(bearing) is a compass heading. */
 .train-icon { background: none; border: 0; }
 .train-mark {
-  width: 16px; height: 8px; margin-top: 4px;
+  width: 9px; height: 20px; margin-left: 4px;
   border-radius: 3px;
-  border: 1.5px solid var(--surface-1);
+  background: var(--train-body);
+  border: 2px solid var(--train-edge);
   box-sizing: border-box;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, .25);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, .6);
+  transform-origin: 50% 50%;
 }
-.train-mark.is-stopped { width: 10px; margin-left: 3px; opacity: .85; }
+.train-mark.is-stopped { height: 13px; margin-top: 3px; }
 /* Not snapped to mapped track: the estimate is looser, so say so visually. */
-.train-mark.is-offtrack { border-style: dashed; opacity: .75; }
+.train-mark.is-offtrack { border-style: dashed; }
+/* Delay is a ring, so the body colour stays the mode's identity. */
+.train-mark.is-late { box-shadow: 0 0 0 2.5px var(--bat-low), 0 1px 5px rgba(0,0,0,.6); }
 
 .legend-shape-train {
-  width: 14px; height: 7px; flex: 0 0 auto; border-radius: 2px;
-  background: var(--series-1); border: 1.5px solid var(--surface-1);
+  width: 8px; height: 15px; flex: 0 0 auto; border-radius: 2px;
+  background: var(--train-body); border: 2px solid var(--train-edge);
 }
 
 /* current-leg progress bar in the train detail panel */
@@ -227,8 +250,18 @@ input[type=range] { width: 100%; accent-color: var(--series-1); }
 }
 .leg-fill { height: 100%; background: var(--series-1); border-radius: 999px; }
 
-.infra-mark.is-live { border-color: var(--series-3); border-width: 3px; }
-.infra-mark.is-late { border-color: var(--bat-low); border-width: 3px; }
+/* Stations stay achromatic: they are infrastructure, not vehicles. Colouring
+   them by activity put the bus green and the delayed-train red back on the
+   map as a third meaning. Busy stations are filled instead of outlined, which
+   reads immediately and adds no hue. */
+.infra-mark.is-live {
+  background: var(--text-secondary);
+  border-color: var(--text-secondary);
+}
+.infra-mark.is-late {
+  background: var(--text-primary);
+  border-color: var(--text-primary);
+}
 
 .chk-n { color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
 
@@ -263,7 +296,11 @@ input[type=range] { width: 100%; accent-color: var(--series-1); }
 .legend-shape-arrow {
   width: 0; height: 0; flex: 0 0 auto;
   border-left: 5px solid transparent; border-right: 5px solid transparent;
-  border-bottom: 10px solid var(--series-3);
+  border-bottom: 11px solid var(--bus-body);
+}
+.legend-mode-scooter {
+  width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%;
+  background: var(--bat-high);
 }
 .legend-shape-square {
   width: 9px; height: 9px; flex: 0 0 auto; border-radius: 2px;
