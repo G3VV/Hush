@@ -91,7 +91,10 @@ RETAIN_DAYS = int(os.environ.get("HUSH_RETAIN_DAYS", "7"))
 # fetch, so the default interval is slower than the scooter poll.
 BODS_GTFSRT_URL = os.environ.get(
     "HUSH_BODS_URL", "https://data.bus-data.dft.gov.uk/avl/download/gtfsrt")
+# With a BODS key the Bristol-only SIRI feed is a fifth the size of the
+# national GTFS-RT file, so it is polled far more often for fresher movement.
 TRANSIT_POLL_INTERVAL_S = int(os.environ.get("HUSH_TRANSIT_INTERVAL", "120"))
+TRANSIT_FAST_INTERVAL_S = int(os.environ.get("HUSH_TRANSIT_FAST_INTERVAL", "20"))
 
 # A BODS API key is optional. Without one, buses still work from the open
 # GTFS-Realtime feed but carry only internal route IDs. With one, the SIRI-VM

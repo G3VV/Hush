@@ -150,11 +150,36 @@ Two things the bus feed does not hand over cleanly, both handled rather than pap
 
 ### Where a bus has been, and where it is going
 
-The **past** is measured: the positions actually recorded for that vehicle. The
-**future** is the operator's own route alignment, taken from the TransXChange timetables
-on BODS, which carry the real road geometry, and cut at the point on that line nearest
-the bus. It is where the bus is *routed* to go, not a prediction of when it arrives, and
-it is drawn dashed to say so.
+The **future** is the operator's own route alignment, taken from the TransXChange
+timetables on BODS, which carry the real road geometry, cut at the point on that line
+nearest the bus. It is where the bus is *routed* to go, not a prediction of when it
+arrives, and it is drawn dashed to say so.
+
+The **past** starts from measured positions, but raw fixes make a poor line: they arrive
+every 20-120 seconds, so consecutive points sit hundreds of metres apart and a straight
+hop between them cuts corners and crosses buildings. Measured on live vehicles, raw fixes
+averaged 526-836 m apart with jumps up to 12 km. So each fix is projected onto the route
+alignment and the *route* between the first and last projection is drawn instead: the same
+journeys come out averaging 8-15 m between points, following the road exactly. Without an
+alignment it falls back to the raw fixes with near-duplicates removed.
+
+### Keeping up with movement
+
+Two feeds do different jobs. SIRI-VM is Bristol-only and about a fifth the size of the
+national GTFS-Realtime file, so it is polled every 20 seconds and keeps moving vehicles
+current; the national feed runs every two minutes for the wider net of vehicles SIRI
+reports only rarely.
+
+The browser refreshes buses and trains every 10 seconds, but polling alone would still
+look like teleporting. Two things smooth it:
+
+- **Buses** keep their markers between refreshes and ease to each new position over a
+  couple of seconds, rather than being redrawn in place.
+- **Trains** are advanced by the browser every animation frame. A train's position is
+  already a function of the clock — a fraction along its current leg, set by when it left
+  one calling point and is due at the next — so the page walks that same model forward
+  between refreshes. The motion is smooth *and* stays truthful, because client and server
+  compute the identical thing.
 
 Line numbers repeat across the country — a "24" exists in a dozen places — so shapes are
 kept only where they overlap the Bristol area. Without that filter a Stagecoach 24 from
@@ -215,7 +240,8 @@ All optional, via environment variables or `.env`:
 | `HUSH_TRANSIT` | `1` | Set `0` to skip buses entirely |
 | `HUSH_TRANSIT_INTERVAL` | `120` | Seconds between bus polls. The national feed is ~2 MB a fetch |
 | `HUSH_TRANSIT_MAX_AGE` | `900` | Drop bus positions older than this |
-| `HUSH_BODS_KEY` | unset | BODS API key: adds route numbers and route geometry |
+| `HUSH_BODS_KEY` | unset | BODS API key: route numbers, route geometry, fast polling |
+| `HUSH_TRANSIT_FAST_INTERVAL` | `20` | Seconds between SIRI polls (needs a BODS key) |
 | `HUSH_TRANSIT_TRAIL` | `10800` | How long bus tracks are kept |
 | `HUSH_BBOX_*` | Greater Bristol | `MIN_LAT`, `MIN_LON`, `MAX_LAT`, `MAX_LON` |
 | `HUSH_RTT_TOKEN` | unset | Realtime Trains refresh token. Rail is skipped without it |

@@ -23,6 +23,9 @@ const state = {
   renderer: null,
   layers: {},
   markers: new Map(),
+  busMarkers: new Map(),
+  trainMarkers: new Map(),
+  trainRAF: null,
 };
 
 /* ── formatting ─────────────────────────────────────────────────────── */
@@ -430,12 +433,58 @@ async function loadBuses() {
   $('#busCount').textContent = data.vehicles.length ? `(${fmtNum(data.vehicles.length)})` : '';
 }
 
+/* Positions arrive every ~20s. Rather than redraw markers on top of each
+   other — which reads as teleporting — existing markers are eased to their new
+   position over a couple of seconds, and only genuinely new vehicles get a
+   fresh marker. */
+function easeMarkers(markers, items, tweenMs = 2500) {
+  const start = performance.now();
+  const legs = [];
+  for (const it of items) {
+    const m = markers.get(it.id);
+    if (!m) continue;
+    const from = m.getLatLng();
+    if (Math.abs(from.lat - it.lat) < 1e-7 && Math.abs(from.lng - it.lon) < 1e-7) continue;
+    legs.push([m, from.lat, from.lng, it.lat, it.lon]);
+  }
+  if (!legs.length) return;
+  const step = now => {
+    const t = Math.min(1, (now - start) / tweenMs);
+    const e = t * (2 - t);                       // ease-out
+    for (const [m, y0, x0, y1, x1] of legs) {
+      m.setLatLng([y0 + (y1 - y0) * e, x0 + (x1 - x0) * e]);
+    }
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
 function drawBuses() {
   const g = state.layers.buses;
-  g.clearLayers();
+  const seen = new Set(state.buses.map(b => b.id));
+
+  /* Reuse markers so they can be animated; drop only what has gone away. */
+  for (const [id, m] of state.busMarkers) {
+    if (!seen.has(id)) { g.removeLayer(m); state.busMarkers.delete(id); }
+  }
+  easeMarkers(state.busMarkers, state.buses);
+
   const col = css('--bus-body');
 
   for (const b of state.buses) {
+    if (state.busMarkers.has(b.id)) {
+      /* Already on the map: refresh the icon in case heading changed. */
+      const m = state.busMarkers.get(b.id);
+      const known = b.brg != null;
+      m.setIcon(L.divIcon({
+        className: 'bus-icon',
+        html: known
+          ? `<div class="bus-arrow" style="transform:rotate(${b.brg}deg)"></div>`
+          : `<div class="bus-dot"></div>`,
+        iconSize: [16, 16], iconAnchor: [8, 8],
+      }));
+      continue;
+    }
     const known = b.brg != null;
     // A bus with a known heading gets a pointed arrow; without one it gets a
     // neutral dot, so the shape never implies a direction we do not have.
@@ -453,6 +502,7 @@ function drawBuses() {
       { direction: 'top', offset: [0, -6] });
     m.on('click', () => selectBus(b.id));
     g.addLayer(m);
+    state.busMarkers.set(b.id, m);
   }
 }
 
@@ -616,9 +666,44 @@ async function loadTrains() {
   $('#trainCount').textContent = data.trains.length ? `(${fmtNum(data.trains.length)})` : '';
 }
 
+/* A train's position is a function of the clock: it is a fraction along its
+   current leg, set by when it left one calling point and is due at the next.
+   The client can therefore advance it continuously between refreshes using the
+   same model the server uses, so motion is smooth AND stays truthful. */
+function trainAt(t, nowS) {
+  const leg = t.leg;
+  if (!leg || leg.length < 2 || !t.leg_start || !t.leg_end || t.state === 'at_station') {
+    return [t.lat, t.lon, t.brg];
+  }
+  const span = Math.max(1, t.leg_end - t.leg_start);
+  const f = Math.min(1, Math.max(0, (nowS - t.leg_start) / span));
+  const pos = f * (leg.length - 1);
+  const i = Math.min(leg.length - 2, Math.floor(pos));
+  const r = pos - i;
+  const lat = leg[i][0] + (leg[i + 1][0] - leg[i][0]) * r;
+  const lon = leg[i][1] + (leg[i + 1][1] - leg[i][1]) * r;
+  const brg = (Math.atan2((leg[i + 1][1] - leg[i][1]) * Math.cos(lat * Math.PI / 180),
+                          leg[i + 1][0] - leg[i][0]) * 180 / Math.PI + 360) % 360;
+  return [lat, lon, brg];
+}
+
+function tickTrains() {
+  const nowS = Date.now() / 1000;
+  for (const t of state.trains) {
+    const m = state.trainMarkers.get(t.uid);
+    if (!m) continue;
+    const [lat, lon, brg] = trainAt(t, nowS);
+    m.setLatLng([lat, lon]);
+    const el = m.getElement() && m.getElement().firstChild;
+    if (el && brg != null) el.style.transform = `rotate(${brg}deg)`;
+  }
+  state.trainRAF = requestAnimationFrame(tickTrains);
+}
+
 function drawTrains() {
   const g = state.layers.trains;
   g.clearLayers();
+  state.trainMarkers.clear();
   for (const t of state.trains) {
     const late = t.delay != null && t.delay > 5;
     /* Body colour is the mode's identity and never changes; lateness is a
@@ -645,7 +730,9 @@ function drawTrains() {
       { direction: 'top', offset: [0, -8] });
     m.on('click', () => selectTrain(t));
     g.addLayer(m);
+    state.trainMarkers.set(t.uid, m);
   }
+  if (!state.trainRAF) tickTrains();
 }
 
 /* Journey geometry: where it has been (solid) and where it is going
