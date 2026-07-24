@@ -92,6 +92,13 @@ RETAIN_DAYS = int(os.environ.get("HUSH_RETAIN_DAYS", "7"))
 BODS_GTFSRT_URL = os.environ.get(
     "HUSH_BODS_URL", "https://data.bus-data.dft.gov.uk/avl/download/gtfsrt")
 TRANSIT_POLL_INTERVAL_S = int(os.environ.get("HUSH_TRANSIT_INTERVAL", "120"))
+
+# A BODS API key is optional. Without one, buses still work from the open
+# GTFS-Realtime feed but carry only internal route IDs. With one, the SIRI-VM
+# feed adds the public route number ("m1", "72"), origin and destination.
+BODS_API_KEY = os.environ.get("HUSH_BODS_KEY", "").strip()
+BODS_SIRI_URL = os.environ.get(
+    "HUSH_BODS_SIRI", "https://data.bus-data.dft.gov.uk/api/v1/datafeed/")
 TRANSIT_ENABLED = os.environ.get("HUSH_TRANSIT", "1") != "0"
 
 # Greater Bristol. (min_lat, min_lon, max_lat, max_lon)

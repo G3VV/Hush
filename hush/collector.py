@@ -375,6 +375,8 @@ class Collector:
                     from . import transit
                     transit.refresh_osm()
                     transit.poll(self.conn)
+                    transit.refresh_line_names(self.conn)
+                    transit.refresh_route_shapes()
                 if (config.RAIL_ENABLED and config.RTT_TOKEN
                         and cycle - last_rail >= config.RAIL_POLL_INTERVAL_S):
                     last_rail = cycle

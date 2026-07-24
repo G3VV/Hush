@@ -20,6 +20,7 @@ README.
 
 import io
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -183,6 +184,58 @@ def poll(conn=None):
             "operators": len(operators), "routes": len(routes)}
 
 
+# --- SIRI-VM: route numbers and journey names ---------------------------------
+#
+# The open GTFS-RT feed identifies a route only by an internal id. SIRI-VM,
+# which needs a (free) API key, carries PublishedLineName -- the number on the
+# front of the bus -- plus origin and destination. Vehicle references match
+# between the two feeds, so this simply enriches what is already tracked.
+
+def _siri_text(block, tag):
+    m = re.search(r"<%s>(.*?)</%s>" % (tag, tag), block, re.S)
+    return m.group(1).strip() if m else None
+
+
+def refresh_line_names(conn=None):
+    if not config.BODS_API_KEY:
+        return 0
+    lo_la, lo_lo, hi_la, hi_lo = config.BBOX
+    url = (config.BODS_SIRI_URL + "?" + urllib.parse.urlencode({
+        "api_key": config.BODS_API_KEY,
+        "boundingBox": f"{lo_lo},{lo_la},{hi_lo},{hi_la}",
+    }))
+    try:
+        raw = _fetch(url, timeout=90).decode("utf-8", "replace")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"[transit] SIRI feed failed: {exc}", flush=True)
+        return 0
+
+    rows = []
+    for block in re.findall(r"<VehicleActivity>(.*?)</VehicleActivity>", raw, re.S):
+        vid = _siri_text(block, "VehicleRef")
+        if not vid:
+            continue
+        rows.append((
+            _siri_text(block, "PublishedLineName") or _siri_text(block, "LineRef"),
+            _siri_text(block, "DirectionRef"),
+            (_siri_text(block, "OriginName") or "").replace("_", " ") or None,
+            (_siri_text(block, "DestinationName") or "").replace("_", " ") or None,
+            _siri_text(block, "DatedVehicleJourneyRef"),
+            vid,
+        ))
+    if not rows:
+        return 0
+    conn = conn or db.connect()
+    conn.executemany(
+        "UPDATE transit_vehicles SET line_name=?, direction=?, origin_name=?, "
+        "destination_name=?, journey_ref=? WHERE vehicle_id=?", rows)
+    conn.commit()
+    named = conn.execute(
+        "SELECT COUNT(*) FROM transit_vehicles WHERE line_name IS NOT NULL").fetchone()[0]
+    print(f"[transit] SIRI: {len(rows)} journeys, {named} vehicles named", flush=True)
+    return len(rows)
+
+
 def prune(conn=None):
     conn = conn or db.connect()
     cutoff = int(time.time()) - config.TRANSIT_TRAIL_S
@@ -239,3 +292,142 @@ def refresh_osm(force=False):
         time.sleep(12)     # Overpass returns 429 if queries come back to back
 
     return total
+
+
+# --- bus route geometry --------------------------------------------------------
+#
+# TransXChange timetables carry the actual road alignment: RouteSection holds
+# RouteLinks, each with a Track of coordinates. Chaining
+# VehicleJourney -> JourneyPattern -> Route -> RouteSection gives a polyline per
+# line and direction, which is what lets a bus's remaining path be drawn rather
+# than guessed. Needs a (free) BODS API key.
+
+TXC_NS = "{http://www.transxchange.org.uk/}"
+
+
+def _parse_transxchange(fh):
+    """Extract {(line_name, direction): [(lat, lon), ...]} from one TXC file."""
+    import xml.etree.ElementTree as ET
+    sections, routes, lines, jps, journeys = {}, {}, {}, {}, []
+    try:
+        for _, el in ET.iterparse(fh, events=("end",)):
+            tag = el.tag.replace(TXC_NS, "")
+            if tag == "RouteSection":
+                pts = []
+                for loc in el.iter(TXC_NS + "Location"):
+                    la, lo = loc.find(TXC_NS + "Latitude"), loc.find(TXC_NS + "Longitude")
+                    if la is not None and lo is not None:
+                        try:
+                            pts.append((float(la.text), float(lo.text)))
+                        except (TypeError, ValueError):
+                            pass
+                sections[el.get("id")] = pts
+                el.clear()
+            elif tag == "Route":
+                routes[el.get("id")] = [r.text for r in el.iter(TXC_NS + "RouteSectionRef")]
+                el.clear()
+            elif tag == "Line":
+                nm = el.find(TXC_NS + "LineName")
+                if nm is not None:
+                    lines[el.get("id")] = (nm.text or "").strip()
+                el.clear()
+            elif tag == "JourneyPattern":
+                rr = el.find(TXC_NS + "RouteRef")
+                di = el.find(TXC_NS + "Direction")
+                if rr is not None:
+                    jps[el.get("id")] = (rr.text, (di.text or "").strip() if di is not None else None)
+                el.clear()
+            elif tag == "VehicleJourney":
+                lr = el.find(TXC_NS + "LineRef")
+                jr = el.find(TXC_NS + "JourneyPatternRef")
+                if lr is not None and jr is not None:
+                    journeys.append((lr.text, jr.text))
+                el.clear()
+    except ET.ParseError:
+        return {}
+
+    out = {}
+    for line_ref, jp_ref in journeys:
+        jp = jps.get(jp_ref)
+        if not jp:
+            continue
+        route_ref, direction = jp
+        name = lines.get(line_ref) or line_ref
+        coords = []
+        for sec in routes.get(route_ref, []):
+            coords.extend(sections.get(sec, []))
+        if len(coords) < 10:
+            continue
+        key = (name, (direction or "outbound").lower())
+        # Several journeys share a route; keep the most complete alignment.
+        if len(coords) > len(out.get(key, [])):
+            out[key] = coords
+    return out
+
+
+def refresh_route_shapes(force=False, max_datasets=6):
+    """Download Bristol-area timetables and store one polyline per line."""
+    if not config.BODS_API_KEY:
+        return 0
+    now = int(time.time())
+    newest = db.scalar("SELECT MAX(fetched_at) FROM bus_routes", default=0) or 0
+    if not force and now - newest < config.OSM_REFRESH_S:
+        return 0
+
+    url = ("https://data.bus-data.dft.gov.uk/api/v1/dataset/?" +
+           urllib.parse.urlencode({"api_key": config.BODS_API_KEY,
+                                   "limit": max_datasets, "search": "Bristol"}))
+    try:
+        catalogue = json.loads(_fetch(url, timeout=90).decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        print(f"[transit] timetable catalogue failed: {exc}", flush=True)
+        return 0
+
+    lo_la, lo_lo, hi_la, hi_lo = config.BBOX
+    pad = 0.35          # keep routes that leave the city but serve it
+
+    def near_bristol(pts):
+        """Line numbers repeat across the country, so anchor to our area."""
+        inside = sum(1 for la, lo in pts
+                     if lo_la - pad <= la <= hi_la + pad
+                     and lo_lo - pad <= lo <= hi_lo + pad)
+        return inside >= max(5, len(pts) * 0.15)
+
+    shapes = {}
+    for ds in (catalogue.get("results") or [])[:max_datasets]:
+        link = ds.get("url")
+        if not link:
+            continue
+        sep = "&" if "?" in link else "?"
+        try:
+            blob = _fetch(link + sep + "api_key=" + config.BODS_API_KEY, timeout=240)
+            with zipfile.ZipFile(io.BytesIO(blob)) as z:
+                for name in z.namelist():
+                    if not name.endswith(".xml"):
+                        continue
+                    with z.open(name) as fh:
+                        for key, pts in _parse_transxchange(fh).items():
+                            if not near_bristol(pts):
+                                continue
+                            if len(pts) > len(shapes.get(key, [])):
+                                shapes[key] = pts
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError,
+                zipfile.BadZipFile) as exc:
+            print(f"[transit] timetable {ds.get('operatorName')} failed: {exc}", flush=True)
+            continue
+        print(f"[transit] parsed {ds.get('operatorName')}: {len(shapes)} shapes so far",
+              flush=True)
+
+    if not shapes:
+        return 0
+    conn = db.connect()
+    conn.executemany(
+        "INSERT INTO bus_routes(line_name, direction, points, n_points, fetched_at) "
+        "VALUES(?,?,?,?,?) ON CONFLICT(line_name, direction) DO UPDATE SET "
+        "points=excluded.points, n_points=excluded.n_points, "
+        "fetched_at=excluded.fetched_at",
+        [(k[0], k[1], json.dumps([[round(a, 5), round(b, 5)] for a, b in v]),
+          len(v), now) for k, v in shapes.items()])
+    conn.commit()
+    print(f"[transit] route shapes: {len(shapes)} line/direction pairs", flush=True)
+    return len(shapes)

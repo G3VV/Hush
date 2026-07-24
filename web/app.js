@@ -445,7 +445,8 @@ function drawBuses() {
       keyboard: false,
     });
     m.bindTooltip(
-      `<b>Bus${b.route ? ' · route ' + b.route : ''}</b><br>${b.op || 'unknown operator'}` +
+      `<b>${b.line ? 'Route ' + b.line : 'Bus'}</b>` +
+      (b.dest ? ` → ${b.dest}` : '') + `<br>${b.op || 'unknown operator'}` +
       `<br>${b.kmh != null ? b.kmh + ' km/h' : 'speed unknown'} · reported ${fmtDur(b.age)} ago`,
       { direction: 'top', offset: [0, -6] });
     m.on('click', () => selectBus(b.id));
@@ -480,7 +481,7 @@ function renderBusDetail(v) {
   $('#detailBody').innerHTML = `
     <div class="detail-inner">
       <div class="veh-head">
-        <div class="veh-type">Bus${v.route_id ? ' · route ' + v.route_id : ''}</div>
+        <div class="veh-type">${v.line_name ? 'Route ' + v.line_name : 'Bus'}${v.destination_name ? ' → ' + v.destination_name : ''}</div>
         <p class="veh-id">${v.id}</p>
         <div class="badges">
           <span class="badge"><span class="legend-swatch" style="background:${css('--series-3')}"></span>${v.operator || 'Unknown operator'}</span>
@@ -510,9 +511,10 @@ function renderBusDetail(v) {
              real trail builds up from here — check back in a few minutes.</div>`}
 
       <p class="muted" style="margin-top:12px">
-        Route shown is the operator's internal GTFS route ID, not the number on the
-        front of the bus — public route names need a (free) BODS API key. Speed is
-        derived between polls; the feed carries no speed field.
+        The solid line is where this bus has actually been; the dashed line is the
+        rest of its route from the operator's timetable — where it is routed to go,
+        not a prediction of when it arrives. Speed is derived between polls, as the
+        feed carries no speed field.
       </p>
     </div>`;
 
@@ -524,26 +526,47 @@ function renderBusDetail(v) {
   });
 }
 
-function drawBusTrack(v) {
+async function drawBusTrack(v) {
   const g = state.layers.trail;
   g.clearLayers();
-  const pts = (v.track || []).filter(p => p.lat != null).map(p => [p.lat, p.lon]);
-  if (pts.length > 1) {
-    L.polyline(pts, { color: css('--series-3'), weight: 3, opacity: 0.9 }).addTo(g);
-    L.circleMarker(pts[0], {
-      radius: 5, color: css('--surface-1'), weight: 2,
-      fillColor: css('--series-3'), fillOpacity: 1,
-    }).bindTooltip('Track starts here', { direction: 'top' }).addTo(g);
-    state.map.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 16 });
-  } else if (v.lat != null) {
-    state.map.flyTo([v.lat, v.lon], 16, { duration: 0.6 });
+
+  /* Past is measured — positions actually recorded. Future is the route
+     alignment from the operator's timetable, so it is where the bus is routed
+     to go rather than a prediction of when it gets there. Dashed says that. */
+  let path = null;
+  try { path = await api('/api/transit/path/' + encodeURIComponent(v.id)); }
+  catch (e) { /* fall back to the recorded track alone */ }
+
+  if (path && path.future && path.future.length > 1) {
+    L.polyline(path.future, {
+      color: css('--bus-body'), weight: 3, opacity: 0.55, dashArray: '7,6',
+    }).bindTooltip('Route ahead' + (path.destination ? ' → ' + path.destination : ''),
+                   { sticky: true }).addTo(g);
   }
+
+  const pts = (path && path.past && path.past.length > 1)
+    ? path.past
+    : (v.track || []).filter(p => p.lat != null).map(p => [p.lat, p.lon]);
+
+  if (pts.length > 1) {
+    L.polyline(pts, { color: css('--bus-body'), weight: 4, opacity: 0.95 })
+      .bindTooltip('Travelled so far', { sticky: true }).addTo(g);
+    L.circleMarker(pts[0], {
+      renderer: state.renderer, radius: 5, color: css('--halo'), weight: 2,
+      fillColor: css('--bus-body'), fillOpacity: 1,
+    }).bindTooltip('Track starts here', { direction: 'top' }).addTo(g);
+  }
+
   if (v.lat != null) {
     L.circleMarker([v.lat, v.lon], {
-      radius: 8, color: css('--text-primary'), weight: 2.5,
-      fillColor: css('--series-3'), fillOpacity: 1,
+      renderer: state.renderer, radius: 8, color: css('--text-primary'), weight: 2.5,
+      fillColor: css('--bus-body'), fillOpacity: 1,
     }).addTo(g);
   }
+
+  const all = (path && path.future ? path.future : []).concat(pts);
+  if (all.length > 1) state.map.fitBounds(L.latLngBounds(all).pad(0.2), { maxZoom: 15 });
+  else if (v.lat != null) state.map.flyTo([v.lat, v.lon], 16, { duration: 0.6 });
 }
 
 /* ── rail ───────────────────────────────────────────────────────────────
@@ -623,6 +646,41 @@ function drawTrains() {
   }
 }
 
+/* Journey geometry: where it has been (solid) and where it is going
+   (dashed). Both follow real track, so they trace the actual line. */
+async function drawTrainPath(uid) {
+  const g = state.layers.trail;
+  g.clearLayers();
+  let d;
+  try {
+    d = await api('/api/trains/' + encodeURIComponent(uid) + '/path');
+  } catch (e) { return; }
+
+  if (d.future && d.future.length > 1) {
+    L.polyline(d.future, {
+      color: css('--series-1'), weight: 3, opacity: 0.75, dashArray: '7,6',
+    }).bindTooltip('Still to come', { sticky: true }).addTo(g);
+  }
+  if (d.past && d.past.length > 1) {
+    L.polyline(d.past, {
+      color: css('--train-body'), weight: 4, opacity: 0.95,
+    }).bindTooltip('Travelled so far', { sticky: true }).addTo(g);
+  }
+  /* Calling points along the way, so the line reads as a journey. */
+  for (const c of d.calls || []) {
+    if (c.lat == null) continue;
+    L.circleMarker([c.lat, c.lon], {
+      renderer: state.renderer, radius: 3.5,
+      color: css('--train-edge'), weight: 1.5,
+      fillColor: css('--train-body'), fillOpacity: 1,
+    }).bindTooltip(
+      `<b>${c.name || c.code}</b>` + (c.arr ? `<span class="t-sub">${fmtTime(c.arr)}</span>` : ''),
+      { direction: 'top' }).addTo(g);
+  }
+  const all = (d.past || []).concat(d.future || []);
+  if (all.length > 1) state.map.fitBounds(L.latLngBounds(all).pad(0.15));
+}
+
 function selectTrain(t) {
   $('#detail').classList.add('is-open');
   const pct = Math.round((t.progress || 0) * 100);
@@ -669,7 +727,7 @@ function selectTrain(t) {
       </p>
     </div>`;
   state.layers.trail.clearLayers();
-  state.map.flyTo([t.lat, t.lon], Math.max(state.map.getZoom(), 13), { duration: 0.6 });
+  drawTrainPath(t.uid);
 }
 
 async function selectStation(code) {

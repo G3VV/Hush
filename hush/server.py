@@ -133,9 +133,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "unknown vehicle"}, 404)
             return self._json(detail)
 
+        if path.startswith("/api/transit/path/"):
+            vid = urllib.parse.unquote(path[len("/api/transit/path/"):])
+            got = analytics.bus_path(vid)
+            if not got:
+                return self._json({"error": "unknown vehicle"}, 404)
+            return self._json(got)
+
         if path == "/api/trains":
             return self._json({"ts": int(time.time()),
                                "trains": analytics.trains_live()})
+
+        if path.startswith("/api/trains/") and path.endswith("/path"):
+            uid = urllib.parse.unquote(path[len("/api/trains/"):-len("/path")])
+            got = analytics.train_path(uid)
+            if not got:
+                return self._json({"error": "unknown train"}, 404)
+            return self._json(got)
 
         if path == "/api/rail":
             return self._json({"stations": analytics.rail_stations()})

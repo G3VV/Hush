@@ -160,6 +160,17 @@ CREATE TABLE IF NOT EXISTS transit_samples (
     feed_age_s     INTEGER
 );
 
+-- Bus route geometry from TransXChange timetables (BODS). Gives the road the
+-- route actually follows, so a vehicle's remaining path can be drawn.
+CREATE TABLE IF NOT EXISTS bus_routes (
+    line_name  TEXT NOT NULL,
+    direction  TEXT NOT NULL,
+    points     TEXT,            -- JSON [[lat,lon],...] in travel order
+    n_points   INTEGER,
+    fetched_at INTEGER,
+    PRIMARY KEY (line_name, direction)
+);
+
 -- Static infrastructure from OpenStreetMap.
 CREATE TABLE IF NOT EXISTS osm_features (
     osm_id     INTEGER PRIMARY KEY,
@@ -235,7 +246,10 @@ CREATE TABLE IF NOT EXISTS train_positions (
     snapped_m    REAL,     -- distance moved when snapping to track
     leg_start_ts INTEGER,
     leg_end_ts   INTEGER,
-    computed_ts  INTEGER
+    computed_ts  INTEGER,
+    path_past    TEXT,     -- JSON [[lat,lon],...] already travelled
+    path_future  TEXT,     -- JSON [[lat,lon],...] still to come
+    calls        TEXT      -- JSON calling points with times
 );
 CREATE INDEX IF NOT EXISTS train_pos_ts ON train_positions(computed_ts DESC);
 
@@ -252,6 +266,14 @@ CREATE TABLE IF NOT EXISTS rail_samples (
 # Columns added after the first release; applied on every start.
 MIGRATIONS = [
     "ALTER TABLE fleet_samples ADD COLUMN in_use INTEGER",
+    "ALTER TABLE train_positions ADD COLUMN path_past TEXT",
+    "ALTER TABLE train_positions ADD COLUMN path_future TEXT",
+    "ALTER TABLE train_positions ADD COLUMN calls TEXT",
+    "ALTER TABLE transit_vehicles ADD COLUMN line_name TEXT",
+    "ALTER TABLE transit_vehicles ADD COLUMN direction TEXT",
+    "ALTER TABLE transit_vehicles ADD COLUMN origin_name TEXT",
+    "ALTER TABLE transit_vehicles ADD COLUMN destination_name TEXT",
+    "ALTER TABLE transit_vehicles ADD COLUMN journey_ref TEXT",
 ]
 
 _local = threading.local()

@@ -314,9 +314,9 @@ def transit_live(max_age_s=None, operator=None, limit=3000):
     from . import config
     max_age_s = max_age_s or config.TRANSIT_MAX_AGE_S
     now = int(time.time())
-    sql = ("SELECT vehicle_id, operator, route_id, lat, lon, bearing, speed_kmh, "
-           "reported_ts, last_seen, distance_m, fixes FROM transit_vehicles "
-           "WHERE last_seen > ?")
+    sql = ("SELECT vehicle_id, operator, route_id, line_name, destination_name, "
+           "lat, lon, bearing, speed_kmh, reported_ts, last_seen, distance_m, fixes "
+           "FROM transit_vehicles WHERE last_seen > ?")
     args = [now - max_age_s]
     if operator:
         sql += " AND operator = ?"
@@ -329,6 +329,8 @@ def transit_live(max_age_s=None, operator=None, limit=3000):
             "id": r["vehicle_id"],
             "op": r["operator"],
             "route": r["route_id"],
+            "line": r["line_name"],
+            "dest": r["destination_name"],
             "lat": round(r["lat"], 6),
             "lon": round(r["lon"], 6),
             "brg": round(r["bearing"]) if r["bearing"] is not None else None,
@@ -354,6 +356,10 @@ def transit_vehicle(vehicle_id, points=400):
         "operator": v["operator"],
         "mode": v["mode"],
         "route_id": v["route_id"],
+        "line_name": v["line_name"],
+        "direction": v["direction"],
+        "origin_name": v["origin_name"],
+        "destination_name": v["destination_name"],
         "trip_id": v["trip_id"],
         "start_time": v["start_time"],
         "lat": v["lat"], "lon": v["lon"],
@@ -369,6 +375,50 @@ def transit_vehicle(vehicle_id, points=400):
         "avg_speed_kmh": round(sum(speeds) / len(speeds), 1) if speeds else None,
         "max_speed_kmh": round(max(speeds), 1) if speeds else None,
         "track": track,
+    }
+
+
+def bus_path(vehicle_id, max_past=300):
+    """A bus's recorded track, and the road ahead from the timetable geometry.
+
+    The past is measured -- positions we actually recorded. The future is the
+    remainder of the route alignment from the operator's own timetable, cut at
+    the point on the line nearest the vehicle. It is where the bus is routed to
+    go, not a prediction of where it will be when.
+    """
+    v = db.one("SELECT vehicle_id, line_name, direction, lat, lon, destination_name "
+               "FROM transit_vehicles WHERE vehicle_id=?", (vehicle_id,))
+    if not v:
+        return None
+    past = [[r["lat"], r["lon"]] for r in db.rows(
+        "SELECT lat, lon FROM transit_positions WHERE vehicle_id=? "
+        "ORDER BY ts DESC LIMIT ?", (vehicle_id, max_past))][::-1]
+
+    future, line = [], v["line_name"]
+    if line and v["lat"] is not None:
+        want = (v["direction"] or "").lower()
+        shapes = db.rows(
+            "SELECT direction, points FROM bus_routes WHERE line_name=?", (line,))
+        chosen = next((r for r in shapes if r["direction"] == want), None) or \
+            (shapes[0] if shapes else None)
+        if chosen:
+            pts = json.loads(chosen["points"] or "[]")
+            if len(pts) > 1:
+                # Cut the alignment at the point nearest the bus.
+                best_i, best_d = 0, None
+                for i, (la, lo) in enumerate(pts):
+                    d = (la - v["lat"]) ** 2 + (lo - v["lon"]) ** 2
+                    if best_d is None or d < best_d:
+                        best_i, best_d = i, d
+                near_m = haversine_m(v["lat"], v["lon"], pts[best_i][0], pts[best_i][1])
+                # Too far from the alignment means the wrong variant; say nothing
+                # rather than draw a road the bus is not on.
+                if near_m <= 500:
+                    future = pts[best_i:]
+    return {
+        "id": v["vehicle_id"], "line": line,
+        "direction": v["direction"], "destination": v["destination_name"],
+        "past": past, "future": future,
     }
 
 
@@ -536,6 +586,23 @@ def trains_live(max_age_s=1800):
             "leg_start": r["leg_start_ts"], "leg_end": r["leg_end_ts"],
         })
     return out
+
+
+def train_path(uid):
+    """One train's journey geometry, split at its current position."""
+    r = db.one("SELECT uid, headcode, operator, origin, destination, path_past, "
+               "path_future, calls, progress, state FROM train_positions WHERE uid=?",
+               (uid,))
+    if not r:
+        return None
+    return {
+        "uid": r["uid"], "code": r["headcode"], "op": r["operator"],
+        "origin": r["origin"], "destination": r["destination"],
+        "state": r["state"], "progress": r["progress"],
+        "past": json.loads(r["path_past"] or "[]"),
+        "future": json.loads(r["path_future"] or "[]"),
+        "calls": json.loads(r["calls"] or "[]"),
+    }
 
 
 def osm_features(kinds=None):
