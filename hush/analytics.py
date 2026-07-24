@@ -13,6 +13,7 @@ import json
 import time
 
 from . import db
+from .collector import haversine_m
 
 # Bristol pricing at time of writing: GBP 1 unlock + GBP 0.25/min, both modes.
 UNLOCK_GBP = 1.00
@@ -218,6 +219,38 @@ def overview(hours=24):
     for m in moves:
         kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
 
+    # Demand by hour of day, averaged over however many days we have.
+    hod = [0] * 24
+    for r in db.rows(
+        "SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS h, "
+        "COUNT(*) AS n FROM events WHERE kind='pickup' AND ts >= ? GROUP BY h",
+        (since,)
+    ):
+        hod[r["h"]] = r["n"]
+    days = max(1.0, span / 86400.0)
+    hod_avg = [round(n / days, 1) for n in hod]
+
+    # Which mode is actually being rented, versus what is on the street.
+    mode_rentals = {"scooter": 0, "bicycle": 0}
+    for p in pickups:
+        if p["vehicle_type_id"] == "dott_bicycle":
+            mode_rentals["bicycle"] += 1
+        else:
+            mode_rentals["scooter"] += 1
+    share_bike_fleet = round(100.0 * bikes / present, 1) if present else 0
+    share_bike_rent = round(
+        100.0 * mode_rentals["bicycle"] / len(pickups), 1) if pickups else 0
+
+    # How concentrated is the fleet? Distance from the city centre, and the
+    # share of rentals coming from the busiest cells.
+    clat, clon = 51.4545, -2.5879
+    dists = [haversine_m(clat, clon, r["lat"], r["lon"]) / 1000.0 for r in db.rows(
+        "SELECT lat, lon FROM vehicles WHERE present=1 AND lat IS NOT NULL")]
+    centre_hist = _hist(dists, [0, 1, 2, 3, 5, 8, 12])
+    cells = hotspots(hours, "pickup", limit=100000)
+    top10 = sum(c["n"] for c in cells[:10])
+    concentration = round(100.0 * top10 / len(pickups), 1) if pickups else 0
+
     poll_count = db.scalar("SELECT COUNT(*) FROM polls WHERE ok=1", default=0)
 
     return {
@@ -255,15 +288,139 @@ def overview(hours=24):
             "median_dwell_s": med_dwell,
             "est_revenue_gbp": est_rev,
             "ops_moves": kinds,
+            "mode_rentals": mode_rentals,
+            "bike_share_fleet_pct": share_bike_fleet,
+            "bike_share_rentals_pct": share_bike_rent,
+            "top10_cell_share_pct": concentration,
         },
         "charts": {
             "battery_hist": battery_hist,
             "idle_hist": idle_hist,
             "dwell_hist": dwell_hist,
             "hourly": hourly,
+            "hour_of_day": hod_avg,
+            "centre_hist": centre_hist,
             "fleet_samples": samples,
         },
+        "transit": transit_overview(hours),
     }
+
+
+# --- public transport ----------------------------------------------------------
+
+def transit_live(max_age_s=None, operator=None, limit=3000):
+    """Buses seen recently enough to still be on the road."""
+    from . import config
+    max_age_s = max_age_s or config.TRANSIT_MAX_AGE_S
+    now = int(time.time())
+    sql = ("SELECT vehicle_id, operator, route_id, lat, lon, bearing, speed_kmh, "
+           "reported_ts, last_seen, distance_m, fixes FROM transit_vehicles "
+           "WHERE last_seen > ?")
+    args = [now - max_age_s]
+    if operator:
+        sql += " AND operator = ?"
+        args.append(operator)
+    sql += " LIMIT ?"
+    args.append(limit)
+    out = []
+    for r in db.rows(sql, tuple(args)):
+        out.append({
+            "id": r["vehicle_id"],
+            "op": r["operator"],
+            "route": r["route_id"],
+            "lat": round(r["lat"], 6),
+            "lon": round(r["lon"], 6),
+            "brg": round(r["bearing"]) if r["bearing"] is not None else None,
+            "kmh": round(r["speed_kmh"], 1) if r["speed_kmh"] is not None else None,
+            "age": now - (r["reported_ts"] or r["last_seen"]),
+            "km": round((r["distance_m"] or 0) / 1000.0, 1),
+        })
+    return out
+
+
+def transit_vehicle(vehicle_id, points=400):
+    v = db.one("SELECT * FROM transit_vehicles WHERE vehicle_id=?", (vehicle_id,))
+    if not v:
+        return None
+    now = int(time.time())
+    track = db.rows(
+        "SELECT ts, lat, lon, bearing, speed_kmh FROM transit_positions "
+        "WHERE vehicle_id=? ORDER BY ts DESC LIMIT ?", (vehicle_id, points))
+    track.reverse()
+    speeds = [p["speed_kmh"] for p in track if p["speed_kmh"] is not None]
+    return {
+        "id": v["vehicle_id"],
+        "operator": v["operator"],
+        "mode": v["mode"],
+        "route_id": v["route_id"],
+        "trip_id": v["trip_id"],
+        "start_time": v["start_time"],
+        "lat": v["lat"], "lon": v["lon"],
+        "bearing": v["bearing"],
+        "speed_kmh": v["speed_kmh"],
+        "reported_ts": v["reported_ts"],
+        "age_s": now - (v["reported_ts"] or v["last_seen"]),
+        "first_seen": v["first_seen"],
+        "last_seen": v["last_seen"],
+        "tracked_s": now - (v["first_seen"] or now),
+        "distance_m": v["distance_m"],
+        "fixes": v["fixes"],
+        "avg_speed_kmh": round(sum(speeds) / len(speeds), 1) if speeds else None,
+        "max_speed_kmh": round(max(speeds), 1) if speeds else None,
+        "track": track,
+    }
+
+
+def transit_overview(hours=24):
+    from . import config
+    now = int(time.time())
+    since = now - hours * 3600
+    cutoff = now - config.TRANSIT_MAX_AGE_S
+
+    live = db.scalar("SELECT COUNT(*) FROM transit_vehicles WHERE last_seen > ?",
+                     (cutoff,), default=0)
+    routes = db.scalar(
+        "SELECT COUNT(DISTINCT route_id) FROM transit_vehicles "
+        "WHERE last_seen > ? AND route_id IS NOT NULL", (cutoff,), default=0)
+    moving = db.scalar(
+        "SELECT COUNT(*) FROM transit_vehicles WHERE last_seen > ? AND speed_kmh > 3",
+        (cutoff,), default=0)
+    avg_speed = db.scalar(
+        "SELECT AVG(speed_kmh) FROM transit_vehicles WHERE last_seen > ? "
+        "AND speed_kmh IS NOT NULL AND speed_kmh > 3", (cutoff,))
+    by_operator = db.rows(
+        "SELECT COALESCE(operator,'Unknown') AS operator, COUNT(*) AS n "
+        "FROM transit_vehicles WHERE last_seen > ? GROUP BY operator "
+        "ORDER BY n DESC LIMIT 10", (cutoff,))
+    samples = db.rows(
+        "SELECT ts, active, moving, operators, routes, mean_speed_kmh "
+        "FROM transit_samples WHERE ts >= ? ORDER BY ts", (since,))
+    speeds = [r["speed_kmh"] for r in db.rows(
+        "SELECT speed_kmh FROM transit_positions WHERE ts >= ? AND speed_kmh IS NOT NULL",
+        (since,))]
+    return {
+        "live": live,
+        "moving": moving,
+        "routes": routes,
+        "operators": len(by_operator),
+        "avg_speed_kmh": round(avg_speed, 1) if avg_speed else None,
+        "by_operator": by_operator,
+        "samples": samples,
+        "speed_hist": _hist(speeds, [0, 5, 10, 15, 20, 25, 30, 40]),
+        "stations": db.scalar(
+            "SELECT COUNT(*) FROM osm_features WHERE kind IN ('rail_station','rail_halt')",
+            default=0),
+    }
+
+
+def osm_features(kinds=None):
+    sql = "SELECT osm_id, kind, name, lat, lon FROM osm_features"
+    args = ()
+    if kinds:
+        marks = ",".join("?" * len(kinds))
+        sql += f" WHERE kind IN ({marks})"
+        args = tuple(kinds)
+    return db.rows(sql, args)
 
 
 def hotspots(hours=24, kind="pickup", cell=0.002, limit=300):

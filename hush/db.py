@@ -115,6 +115,61 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_ts ON events(ts DESC);
 CREATE INDEX IF NOT EXISTS events_kind ON events(kind, ts DESC);
+
+-- ---------------------------------------------------------------------------
+-- Public transport. Unlike the scooters, bus vehicle ids are stable fleet
+-- identifiers, so these vehicles can be followed properly and have real tracks.
+CREATE TABLE IF NOT EXISTS transit_vehicles (
+    vehicle_id   TEXT PRIMARY KEY,
+    operator     TEXT,
+    mode         TEXT,          -- bus | coach
+    route_id     TEXT,
+    trip_id      TEXT,
+    start_time   TEXT,
+    lat          REAL,
+    lon          REAL,
+    bearing      REAL,
+    speed_kmh    REAL,          -- derived between polls; the feed omits speed
+    reported_ts  INTEGER,       -- operator's own timestamp
+    first_seen   INTEGER,
+    last_seen    INTEGER,
+    distance_m   REAL DEFAULT 0,
+    fixes        INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS transit_last_seen ON transit_vehicles(last_seen DESC);
+CREATE INDEX IF NOT EXISTS transit_operator ON transit_vehicles(operator);
+
+CREATE TABLE IF NOT EXISTS transit_positions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    vehicle_id  TEXT NOT NULL,
+    ts          INTEGER NOT NULL,
+    lat         REAL, lon REAL,
+    bearing     REAL,
+    speed_kmh   REAL
+);
+CREATE INDEX IF NOT EXISTS transit_pos_vehicle ON transit_positions(vehicle_id, ts DESC);
+CREATE INDEX IF NOT EXISTS transit_pos_ts ON transit_positions(ts);
+
+CREATE TABLE IF NOT EXISTS transit_samples (
+    ts             INTEGER PRIMARY KEY,
+    active         INTEGER,
+    moving         INTEGER,
+    operators      INTEGER,
+    routes         INTEGER,
+    mean_speed_kmh REAL,
+    feed_age_s     INTEGER
+);
+
+-- Static infrastructure from OpenStreetMap.
+CREATE TABLE IF NOT EXISTS osm_features (
+    osm_id     INTEGER PRIMARY KEY,
+    kind       TEXT,     -- rail_station | rail_halt | bus_stop | bus_station | ferry_terminal
+    name       TEXT,
+    lat        REAL,
+    lon        REAL,
+    fetched_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS osm_kind ON osm_features(kind);
 """
 
 # Columns added after the first release; applied on every start.

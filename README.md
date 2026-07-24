@@ -1,12 +1,19 @@
 # Hush
 
-Live map and analytics for the Dott e-scooter and e-bike fleet in **Bristol**, built on
-Dott's public GBFS feed.
+Live map and analytics for getting around **Bristol**: Dott's e-scooters and e-bikes, plus
+every bus and coach on the road, plus the rail network.
 
-- **Map** — every rentable vehicle in the city, coloured by battery, type or idle time,
-  clickable for detail, with geofencing zones, parking bays and rental hotspots as overlays.
-- **Analytics** — fleet size, rentals per hour, battery distribution, dead stock, wait times.
+- **Map** — ~3,100 rentable Dott vehicles and ~175 live buses at once. Mode is drawn by
+  shape (circles are scooters, arrows are buses pointing their heading, squares are
+  stations), leaving colour free to mean battery level. Everything is clickable.
+  Overlays: geofencing zones, parking bays, rental hotspots, rebalancing pressure,
+  rail stations, bus stops, ferry piers.
+- **Analytics** — fleet size, rentals per hour, demand by hour of day, battery
+  distribution, dead stock, wait times, spatial spread, and a public transport section
+  (buses live, moving, by operator, speed distribution).
 - **Fleet** — the same data as sortable tables: longest idle, flattest battery, fastest rented.
+
+Every data source is open and **none needs an API key**.
 
 No dependencies beyond the Python standard library. Leaflet loads from a CDN; run
 `sh scripts/vendor-leaflet.sh` to keep a local copy instead, which the page picks up
@@ -58,6 +65,42 @@ Both depend on having seen a quiet period to calibrate the fleet size, so they s
 out until the collector has ~12 hours of data including one overnight lull. The dashboard
 shows how much longer it needs rather than printing a number it cannot stand behind.
 
+## Public transport
+
+Three modes, three very different levels of availability. Measured, not assumed:
+
+| Mode | What is available | Source |
+|---|---|---|
+| **Bus / coach** | Live positions, ~175 in Bristol at any moment, updated every couple of minutes | DfT Bus Open Data Service, national GTFS-Realtime, **no key** |
+| **Rail** | Station positions only — **no live trains** | OpenStreetMap |
+| **Ferry** | Pier positions only | OpenStreetMap |
+
+**Why there are no live trains.** Every UK source for real-time train positions —
+Network Rail's open data feeds, National Rail's Darwin, Realtime Trains — requires a
+registered account and credentials. None can be read anonymously, so rail is shown as
+stations rather than moving vehicles. If you register for any of them, that is the
+natural place to extend `hush/transit.py`.
+
+Two things the bus feed does not hand over cleanly, both handled rather than papered over:
+
+- **Stale vehicles.** Operators leave dead vehicles in the feed for hours — the tail
+  reaches a full day old. Anything whose last report is older than 15 minutes
+  (`HUSH_TRANSIT_MAX_AGE`) is dropped instead of being drawn as a bus that is not there.
+  In practice this removes about half the vehicles inside the bounding box.
+- **Route names.** The feed carries the operator's internal GTFS `route_id` ("7444"), not
+  the number on the front of the bus. Mapping one to the other needs either a free BODS
+  API key or the 212 MB regional timetable download, so the internal ID is shown as-is
+  rather than guessed at. The server does not support range requests, so there is no
+  cheap way to pull just `routes.txt` out of that archive.
+
+Unlike the scooters, **bus fleet numbers are stable**, so buses genuinely can be followed:
+each one has a recorded track, a real distance travelled, and a speed derived between
+polls (the feed has no speed field). Clicking a bus draws its trail.
+
+GTFS-Realtime is protobuf, and Hush has no third-party dependencies, so `hush/gtfsrt.py`
+decodes the wire format directly — about 150 lines, covering only the vehicle-position
+subset that is actually used.
+
 ## How history is built
 
 The feed is a snapshot with no history endpoint, so history is accumulated by polling. Each
@@ -84,6 +127,11 @@ All optional, via environment variables:
 | `HUSH_DB` | `data/hush.db` | SQLite path |
 | `HUSH_RETAIN_DAYS` | `7` | How long to keep retired vehicle IDs |
 | `HUSH_HOST` / `HUSH_PORT` | `127.0.0.1:8000` | Bind address |
+| `HUSH_TRANSIT` | `1` | Set `0` to skip buses entirely |
+| `HUSH_TRANSIT_INTERVAL` | `120` | Seconds between bus polls. The national feed is ~2 MB a fetch |
+| `HUSH_TRANSIT_MAX_AGE` | `900` | Drop bus positions older than this |
+| `HUSH_TRANSIT_TRAIL` | `10800` | How long bus tracks are kept |
+| `HUSH_BBOX_*` | Greater Bristol | `MIN_LAT`, `MIN_LON`, `MAX_LAT`, `MAX_LON` |
 
 Run the collector headless (no dashboard), or the dashboard against an existing database:
 
@@ -103,6 +151,9 @@ python3 -m hush.server --no-collector # serve only
 | `/api/hotspots?hours=24` | Rental and drop-off hotspots, grid-clustered |
 | `/api/balance?hours=24` | Net gain/drain per area — where rebalancing is needed |
 | `/api/events?hours=24` | Raw rental start/end events |
+| `/api/transit` | Live buses and coaches |
+| `/api/transit/vehicle/<id>` | One bus: state plus its recorded track |
+| `/api/infrastructure?kind=rail_station` | Stations, stops and piers |
 | `/api/leaderboard?hours=24` | Longest idle, flattest battery, fastest rented |
 | `/api/zones`, `/api/stations`, `/api/pricing` | Cached static feeds |
 
@@ -112,14 +163,20 @@ python3 -m hush.server --no-collector # serve only
 hush/          collector, analytics and server (stdlib only)
   config.py    tunables and feed URLs
   db.py        SQLite schema
-  collector.py polling and event inference
+  collector.py scooter polling and event inference
+  gtfsrt.py    minimal GTFS-Realtime protobuf decoder
+  transit.py   buses from BODS, infrastructure from OpenStreetMap
   analytics.py aggregations
   server.py    HTTP API + static files
-web/           dashboard (vanilla JS, vendored Leaflet)
+web/           dashboard (vanilla JS, Leaflet)
+scripts/       optional Leaflet vendoring
 data/hush.db   created on first run
 ```
 
 Pricing used for revenue estimates is Bristol's at time of writing: £1 unlock + £0.25/min,
 read from the live `system_pricing_plans` feed.
 
-Vehicle data © Dott, via their public GBFS feed. Basemap © OpenStreetMap contributors, © CARTO.
+Scooter and bike data © Dott, via their public GBFS feed. Bus and coach positions © the
+operators, via the DfT Bus Open Data Service (Open Government Licence). Station, stop and
+pier positions © OpenStreetMap contributors (ODbL). Basemap © OpenStreetMap contributors,
+© CARTO.
