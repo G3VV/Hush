@@ -533,6 +533,101 @@ function drawBusTrack(v) {
   }
 }
 
+/* ── rail ───────────────────────────────────────────────────────────────
+   Realtime Trains gives timings, not coordinates, so there are no moving
+   train markers. Stations become live instead: click one for a real board. */
+
+async function loadRail(layer) {
+  const { stations } = await api('/api/rail');
+  if (!stations.length) {
+    toast('No rail stations matched yet — needs an RTT token and one poll');
+    return;
+  }
+  for (const s of stations) {
+    const busy = s.services > 0;
+    const late = s.avg_delay != null && s.avg_delay > 5;
+    L.marker([s.lat, s.lon], {
+      icon: L.divIcon({
+        className: 'infra-icon',
+        html: `<div class="infra-mark is-rail${busy ? ' is-live' : ''}${late ? ' is-late' : ''}"></div>`,
+        iconSize: [13, 13], iconAnchor: [6.5, 6.5],
+      }),
+      keyboard: false,
+    }).bindTooltip(
+      `<b>${s.name}</b><br>${s.services} service${s.services === 1 ? '' : 's'} due` +
+      (s.avg_delay != null ? `<br>avg ${s.avg_delay > 0 ? '+' : ''}${s.avg_delay} min` : ''),
+      { direction: 'top', offset: [0, -6] })
+      .on('click', () => selectStation(s.code))
+      .addTo(layer);
+  }
+}
+
+async function selectStation(code) {
+  const box = $('#detail');
+  box.classList.add('is-open');
+  $('#detailBody').innerHTML = '<div class="detail-inner"><p class="muted">Loading board…</p></div>';
+  let d;
+  try {
+    d = await api('/api/rail/station/' + encodeURIComponent(code));
+  } catch (e) {
+    $('#detailBody').innerHTML = `<div class="detail-inner"><p class="muted">Could not load: ${e.message}</p></div>`;
+    return;
+  }
+  renderBoard(d);
+  state.layers.trail.clearLayers();
+  state.map.flyTo([d.station.lat, d.station.lon], 15, { duration: 0.6 });
+}
+
+function renderBoard(d) {
+  const st = d.station;
+  const upcoming = d.services.filter(s => !s.is_cancelled);
+  const delays = upcoming.map(s => s.delay_min).filter(v => v != null);
+  const avg = delays.length ? (delays.reduce((a, b) => a + b, 0) / delays.length) : null;
+
+  const rows = d.services.length ? d.services.map(s => {
+    const t = s.scheduled_ts ? fmtTime(s.scheduled_ts) : '--:--';
+    let status, cls;
+    if (s.is_cancelled) { status = 'Cancelled'; cls = 'is-cancelled'; }
+    else if (s.delay_min == null) { status = 'No forecast'; cls = ''; }
+    else if (s.delay_min <= 0) { status = 'On time'; cls = 'is-ontime'; }
+    else if (s.delay_min <= 5) { status = `+${s.delay_min} min`; cls = 'is-ontime'; }
+    else { status = `+${s.delay_min} min`; cls = 'is-late'; }
+    return `<div class="board-row">
+        <div class="board-time">${t}</div>
+        <div class="board-mid">
+          <div class="board-dest">${s.destination || '—'}</div>
+          <div class="board-sub">${s.operator || ''}${s.platform ? ' · plat ' + s.platform : ''}${s.headcode ? ' · ' + s.headcode : ''}</div>
+        </div>
+        <div class="board-status ${cls}">${status}</div>
+      </div>`;
+  }).join('') : `<div class="empty">No services on the board right now.</div>`;
+
+  $('#detailBody').innerHTML = `
+    <div class="detail-inner">
+      <div class="veh-head">
+        <div class="veh-type">Rail station · ${st.code}</div>
+        <p class="veh-id" style="font-family:var(--sans);font-size:15px">${st.name}</p>
+      </div>
+
+      <div class="kv">
+        <div class="kv-item"><div class="kv-k">Services due</div>
+          <div class="kv-v">${upcoming.length}</div></div>
+        <div class="kv-item"><div class="kv-k">Average delay</div>
+          <div class="kv-v" style="color:${avg == null ? 'inherit' : avg > 5 ? css('--bat-low') : css('--series-3')}">
+            ${avg == null ? '—' : (avg > 0 ? '+' : '') + avg.toFixed(1) + '<small>min</small>'}</div></div>
+      </div>
+
+      <div class="sub-head"><span>Live board</span><span>${d.services.length} services</span></div>
+      <div class="board">${rows}</div>
+
+      <p class="muted" style="margin-top:12px">
+        Live timings from Realtime Trains. That feed carries no coordinates for
+        trains, so services are shown against the stations they call at rather
+        than as moving markers on the map.
+      </p>
+    </div>`;
+}
+
 /* Infrastructure: squares in neutral ink, so it never competes with vehicles. */
 async function loadInfrastructure(kinds, layer, label) {
   const q = kinds.map(k => 'kind=' + encodeURIComponent(k)).join('&');
@@ -917,6 +1012,7 @@ function renderStats(s) {
     { unit: 'vehicles' });
 
   renderTransit(s.transit || {});
+  renderRail(s.rail || {});
 
   barChart($('#chartDwell'),
     ['<15m', '15–30m', '30–60m', '1–2h', '2–4h', '4–8h', '8–24h', '24h+']
@@ -967,6 +1063,63 @@ function renderTransit(t) {
     ['0–5', '5–10', '10–15', '15–20', '20–25', '25–30', '30–40', '40+']
       .map((l, i) => ({ label: l + ' km/h', short: l.split('–')[0], value: (t.speed_hist || [])[i] })),
     { unit: 'fixes', empty: 'Speed needs two consecutive fixes per vehicle — building.' });
+}
+
+function renderRail(r) {
+  if (!r.enabled) {
+    $('#railNote').textContent = 'not configured';
+    $('#railTiles').innerHTML =
+      `<div class="empty" style="grid-column:1/-1">Rail is off. Set <code>HUSH_RTT_TOKEN</code>
+       to a Realtime Trains token and restart to switch it on.</div>`;
+    ['#chartRailDelay', '#chartRailOperators'].forEach(id => emptyChart($(id), 'Rail not configured.'));
+    $('#railWorst').innerHTML = '';
+    return;
+  }
+
+  $('#railNote').textContent =
+    `${fmtNum(r.services)} services seen across ${fmtNum(r.stations)} stations`;
+
+  $('#railTiles').innerHTML = [
+    ['Services tracked', fmtNum(r.services), `across ${fmtNum(r.stations)} stations`],
+    ['Average delay', r.mean_delay_min != null ? (r.mean_delay_min > 0 ? '+' : '') + r.mean_delay_min + ' min' : '—', 'excludes cancellations'],
+    ['On time', r.on_time_pct != null ? r.on_time_pct + '%' : '—', 'within 5 minutes'],
+    ['Cancelled', fmtNum(r.cancelled || 0), 'in this window'],
+  ].map(([k, v, sub]) =>
+    `<div class="tile"><div class="tile-k">${k}</div><div class="tile-v">${v}</div>
+     <div class="tile-sub">${sub}</div></div>`).join('');
+
+  /* Delay is a diverging measure — early, on time, late — so early running
+     gets its own colour rather than being lumped in with lateness. */
+  const early = css('--series-1'), ok = css('--series-3'), late = css('--bat-low');
+  barChart($('#chartRailDelay'),
+    [['Early', early], ['On time', ok], ['≤2 min', ok], ['3–5 min', ok],
+     ['6–10 min', css('--bat-mid')], ['11–30 min', late], ['30 min+', late]]
+      .map(([l, colour], i) => ({
+        label: l, short: l.replace(' min', ''), value: (r.delay_hist || [])[i], color: colour,
+      })),
+    { unit: 'services', empty: 'No rail services observed yet.' });
+
+  barChart($('#chartRailOperators'),
+    (r.by_operator || []).filter(o => o.avg_delay != null).slice(0, 6).map(o => ({
+      label: `${o.operator} · ${o.n} services`,
+      short: o.operator.replace('Great Western Railway', 'GWR').split(' ')[0],
+      value: o.avg_delay,
+      color: o.avg_delay > 5 ? css('--bat-low') : css('--series-3'),
+    })),
+    { unit: 'min average delay', empty: 'No operator data yet.' });
+
+  const worst = r.worst || [];
+  $('#railWorst').innerHTML = worst.length
+    ? `<table><thead><tr><th>Service</th><th>Operator</th><th>Towards</th><th>At</th><th>Delay</th></tr></thead><tbody>` +
+      worst.map(w => `<tr>
+          <td class="id">${w.headcode || '—'}</td>
+          <td>${w.operator || '—'}</td>
+          <td>${w.destination || '—'}</td>
+          <td class="id">${w.station_code}</td>
+          <td class="num" style="color:${w.delay_min > 5 ? css('--bat-low') : 'inherit'}">
+            ${w.delay_min > 0 ? '+' : ''}${w.delay_min} min</td>
+        </tr>`).join('') + `</tbody></table>`
+    : `<div class="empty" style="margin:16px">Nothing delayed right now.</div>`;
 }
 
 /* ── fleet table ────────────────────────────────────────────────────── */
@@ -1073,8 +1226,7 @@ function wire() {
     if (e.target.checked) state.layers.vehicles.addTo(state.map);
     else state.map.removeLayer(state.layers.vehicles);
   });
-  $('#layerRail').addEventListener('change', e => toggleLayer('rail', e.target.checked,
-    l => loadInfrastructure(['rail_station', 'rail_halt'], l, 'rail stations')));
+  $('#layerRail').addEventListener('change', e => toggleLayer('rail', e.target.checked, loadRail));
   $('#layerStops').addEventListener('change', e => toggleLayer('stops', e.target.checked,
     l => loadInfrastructure(['bus_stop', 'bus_station'], l, 'bus stops')));
   $('#layerFerry').addEventListener('change', e => toggleLayer('ferry', e.target.checked,
@@ -1119,7 +1271,7 @@ async function main() {
 
   await loadLive();
   loadBuses();
-  toggleLayer('rail', true, l => loadInfrastructure(['rail_station', 'rail_halt'], l, 'rail stations'));
+  toggleLayer('rail', true, loadRail);
 
   if (h && h.polls <= 1) {
     toast('Collector just started — ride history builds up as it watches the feed', 5200);

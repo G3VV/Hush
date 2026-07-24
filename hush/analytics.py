@@ -303,6 +303,7 @@ def overview(hours=24):
             "fleet_samples": samples,
         },
         "transit": transit_overview(hours),
+        "rail": rail_overview(hours),
     }
 
 
@@ -410,6 +411,103 @@ def transit_overview(hours=24):
         "stations": db.scalar(
             "SELECT COUNT(*) FROM osm_features WHERE kind IN ('rail_station','rail_halt')",
             default=0),
+    }
+
+
+# --- rail ----------------------------------------------------------------------
+
+def rail_stations():
+    """Stations with a live-board count, for the map."""
+    now = int(time.time())
+    return db.rows(
+        "SELECT s.code, s.name, s.lat, s.lon, "
+        "  COUNT(v.uid) AS services, "
+        "  ROUND(AVG(CASE WHEN v.is_cancelled=0 THEN v.delay_min END), 1) AS avg_delay, "
+        "  SUM(v.is_cancelled) AS cancelled "
+        "FROM rail_stations s "
+        "LEFT JOIN rail_services v ON v.station_code = s.code "
+        "  AND v.scheduled_ts > ? AND v.scheduled_ts < ? "
+        "GROUP BY s.code ORDER BY s.name", (now - 1800, now + 7200))
+
+
+def rail_board(code, limit=40):
+    """One station's live departure board."""
+    now = int(time.time())
+    station = db.one("SELECT code, name, lat, lon FROM rail_stations WHERE code=?", (code,))
+    if not station:
+        return None
+    services = db.rows(
+        "SELECT uid, headcode, operator, operator_code, origin, destination, "
+        "scheduled_ts, forecast_ts, delay_min, is_cancelled, platform, coaches, leg, seen_ts "
+        "FROM rail_services WHERE station_code=? AND scheduled_ts > ? "
+        "ORDER BY COALESCE(forecast_ts, scheduled_ts) LIMIT ?",
+        (code, now - 3600, limit))
+    return {"station": station, "services": services, "now": now}
+
+
+def rail_overview(hours=24):
+    now = int(time.time())
+    since = now - hours * 3600
+    rows = db.rows(
+        "SELECT operator, delay_min, is_cancelled FROM rail_services WHERE seen_ts >= ?",
+        (since,))
+    delays = [r["delay_min"] for r in rows
+              if r["delay_min"] is not None and not r["is_cancelled"]]
+    cancelled = sum(1 for r in rows if r["is_cancelled"])
+
+    by_op = {}
+    for r in rows:
+        op = r["operator"] or "Unknown"
+        slot = by_op.setdefault(op, {"operator": op, "n": 0, "delay_sum": 0,
+                                     "delay_n": 0, "cancelled": 0})
+        slot["n"] += 1
+        slot["cancelled"] += 1 if r["is_cancelled"] else 0
+        if r["delay_min"] is not None and not r["is_cancelled"]:
+            slot["delay_sum"] += r["delay_min"]
+            slot["delay_n"] += 1
+    operators = []
+    for slot in by_op.values():
+        operators.append({
+            "operator": slot["operator"], "n": slot["n"],
+            "cancelled": slot["cancelled"],
+            "avg_delay": round(slot["delay_sum"] / slot["delay_n"], 1) if slot["delay_n"] else None,
+        })
+    operators.sort(key=lambda d: -d["n"])
+
+    # Delay buckets, including early running, which a plain histogram hides.
+    buckets = [0] * 7
+    for d in delays:
+        if d < 0:
+            buckets[0] += 1
+        elif d == 0:
+            buckets[1] += 1
+        elif d <= 2:
+            buckets[2] += 1
+        elif d <= 5:
+            buckets[3] += 1
+        elif d <= 10:
+            buckets[4] += 1
+        elif d <= 30:
+            buckets[5] += 1
+        else:
+            buckets[6] += 1
+
+    return {
+        "enabled": bool(db.scalar("SELECT COUNT(*) FROM rail_stations", default=0)),
+        "stations": db.scalar("SELECT COUNT(*) FROM rail_stations", default=0),
+        "services": len(rows),
+        "cancelled": cancelled,
+        "mean_delay_min": round(sum(delays) / len(delays), 1) if delays else None,
+        "on_time_pct": round(100.0 * sum(1 for d in delays if d <= 5) / len(delays), 1) if delays else None,
+        "worst": db.rows(
+            "SELECT headcode, operator, origin, destination, delay_min, station_code "
+            "FROM rail_services WHERE seen_ts >= ? AND delay_min IS NOT NULL "
+            "ORDER BY delay_min DESC LIMIT 8", (since,)),
+        "by_operator": operators[:8],
+        "delay_hist": buckets,
+        "samples": db.rows(
+            "SELECT ts, services, cancelled, mean_delay_min, on_time_pct "
+            "FROM rail_samples WHERE ts >= ? ORDER BY ts", (since,)),
     }
 
 

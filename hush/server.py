@@ -133,6 +133,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "unknown vehicle"}, 404)
             return self._json(detail)
 
+        if path == "/api/rail":
+            return self._json({"stations": analytics.rail_stations()})
+
+        if path.startswith("/api/rail/station/"):
+            code = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+            board = analytics.rail_board(code)
+            if not board:
+                return self._json({"error": "unknown station"}, 404)
+            return self._json(board)
+
         if path == "/api/infrastructure":
             kinds = qs.get("kind")
             return self._json({"features": analytics.osm_features(kinds)})
