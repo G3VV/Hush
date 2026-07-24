@@ -140,7 +140,25 @@ samples are never pruned — they are the historical record.
 
 ## Configuration
 
-All optional, via environment variables:
+Settings come from environment variables, or from a `.env` file in the project root
+(next to this README). Copy the template and fill in what you need:
+
+```bash
+cp .env.example .env
+```
+
+```ini
+# .env
+HUSH_RTT_TOKEN='eyJhbGci…'
+HUSH_PORT=9067
+```
+
+`KEY=VALUE` per line, `#` for comments, quotes optional but wise for tokens. A real
+environment variable always beats the file, so `HUSH_PORT=9000 python3 -m hush.server`
+still wins for that run. `.env` is gitignored; `.env.example` is the committed template.
+Point somewhere else with `HUSH_ENV_FILE=/path/to/file`.
+
+All optional, via environment variables or `.env`:
 
 | Variable | Default | Meaning |
 |---|---|---|

@@ -1,6 +1,47 @@
-"""Configuration for the Hush collector and server."""
+"""Configuration for the Hush collector and server.
+
+Every setting is an environment variable. They can also be written to a `.env`
+file in the project root, which is read once at import, before anything below
+is evaluated.
+"""
 
 import os
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_dotenv(path):
+    """Read KEY=VALUE lines from `path` into the environment.
+
+    Deliberately minimal: no interpolation, no multi-line values. A real
+    environment variable always wins, so `HUSH_PORT=9000 python3 -m hush.server`
+    still overrides whatever the file says.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return          # no .env is the normal case, not an error
+
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]          # strip matching quotes
+        elif " #" in value:
+            value = value.split(" #", 1)[0].strip()   # trailing comment
+        if key:
+            os.environ.setdefault(key, value)
+
+
+_load_dotenv(os.environ.get("HUSH_ENV_FILE") or os.path.join(PROJECT_ROOT, ".env"))
 
 CITY = os.environ.get("HUSH_CITY", "bristol")
 GBFS_BASE = "https://gbfs.api.ridedott.com/public/v2"
