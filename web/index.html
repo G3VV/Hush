@@ -242,6 +242,47 @@
         <div class="chart" id="chartBusSpeed"></div>
       </figure>
     </div>
+
+    <div class="section-head" style="margin-top:26px">
+      <div>
+        <h2>Rail</h2>
+        <p class="muted" id="railNote">—</p>
+      </div>
+    </div>
+
+    <div class="tiles" id="railTiles"></div>
+
+    <div class="note" id="railNoteBox">
+      <strong>Timings, not positions.</strong> Realtime Trains returns when services
+      call where, with live forecasts, delays, platforms and cancellations — but
+      <em>no coordinates anywhere</em>, in either the service data or the reference data.
+      So trains are not drawn as moving markers. Each station is live instead: click one
+      on the map for its real board. Station coordinates come from OpenStreetMap, matched
+      to RTT codes by name.
+    </div>
+
+    <div class="grid">
+      <figure class="card">
+        <figcaption>
+          <h3>How late is it running?</h3>
+          <p class="muted">Every service seen at a Bristol-area station, against its scheduled time.</p>
+        </figcaption>
+        <div class="chart" id="chartRailDelay"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Punctuality by operator</h3>
+          <p class="muted">Average delay in minutes across the services observed.</p>
+        </figcaption>
+        <div class="chart" id="chartRailOperators"></div>
+      </figure>
+    </div>
+
+    <div class="card table-card" id="railWorstCard">
+      <p class="table-note">Most delayed services currently tracked.</p>
+      <div id="railWorst"></div>
+    </div>
   </div>
 </main>
 

@@ -170,6 +170,47 @@ CREATE TABLE IF NOT EXISTS osm_features (
     fetched_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS osm_kind ON osm_features(kind);
+
+-- Rail. Realtime Trains gives timings, not positions, so these are station
+-- boards rather than moving vehicles. Coordinates come from OpenStreetMap,
+-- matched to RTT station codes by name.
+CREATE TABLE IF NOT EXISTS rail_stations (
+    code      TEXT PRIMARY KEY,
+    name      TEXT,
+    lat       REAL,
+    lon       REAL,
+    synced_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS rail_services (
+    uid           TEXT NOT NULL,
+    station_code  TEXT NOT NULL,
+    headcode      TEXT,
+    operator_code TEXT,
+    operator      TEXT,
+    origin        TEXT,
+    destination   TEXT,
+    scheduled_ts  INTEGER,
+    forecast_ts   INTEGER,
+    delay_min     INTEGER,
+    is_cancelled  INTEGER DEFAULT 0,
+    platform      TEXT,
+    coaches       INTEGER,
+    leg           TEXT,
+    seen_ts       INTEGER,
+    PRIMARY KEY (uid, station_code)
+);
+CREATE INDEX IF NOT EXISTS rail_svc_station ON rail_services(station_code, scheduled_ts);
+CREATE INDEX IF NOT EXISTS rail_svc_seen ON rail_services(seen_ts DESC);
+
+CREATE TABLE IF NOT EXISTS rail_samples (
+    ts             INTEGER PRIMARY KEY,
+    stations       INTEGER,
+    services       INTEGER,
+    cancelled      INTEGER,
+    mean_delay_min REAL,
+    on_time_pct    REAL
+);
 """
 
 # Columns added after the first release; applied on every start.

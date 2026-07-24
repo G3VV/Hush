@@ -193,7 +193,35 @@ input[type=range] { width: 100%; accent-color: var(--series-1); }
   border-width: 1.5px; border-color: var(--text-muted);
 }
 
+.infra-mark.is-live { border-color: var(--series-3); border-width: 3px; }
+.infra-mark.is-late { border-color: var(--bat-low); border-width: 3px; }
+
 .chk-n { color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
+
+/* live departure board */
+.board { display: flex; flex-direction: column; gap: 1px; }
+.board-row {
+  display: grid; grid-template-columns: 46px 1fr auto;
+  gap: 9px; align-items: center;
+  padding: 8px 9px; background: var(--surface-2); border-radius: 7px;
+}
+.board-time { font-family: var(--mono); font-size: 13px; color: var(--text-primary); }
+.board-mid { min-width: 0; }
+.board-dest {
+  font-size: 12.5px; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.board-sub {
+  font-size: 10.5px; color: var(--text-muted); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.board-status {
+  font-size: 11px; font-family: var(--mono); white-space: nowrap;
+  color: var(--text-secondary);
+}
+.board-status.is-ontime { color: var(--series-3); }
+.board-status.is-late { color: var(--bat-low); }
+.board-status.is-cancelled { color: var(--bat-low); font-weight: 600; }
 
 .legend { border-top: 1px solid var(--border); padding-top: 10px; margin-bottom: 9px; }
 .legend-row { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--text-secondary); padding: 2.5px 0; }

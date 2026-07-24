@@ -362,6 +362,7 @@ class Collector:
         print(f"[collector] polling {config.CITY} every {interval}s", flush=True)
         last_prune = 0
         last_transit = 0
+        last_rail = 0
         while True:
             cycle = time.time()
             try:
@@ -374,11 +375,19 @@ class Collector:
                     from . import transit
                     transit.refresh_osm()
                     transit.poll(self.conn)
+                if (config.RAIL_ENABLED and config.RTT_TOKEN
+                        and cycle - last_rail >= config.RAIL_POLL_INTERVAL_S):
+                    last_rail = cycle
+                    from . import rail
+                    rail.poll()
                 if cycle - last_prune > 3600:
                     self.prune()
                     if config.TRANSIT_ENABLED:
                         from . import transit
                         transit.prune(self.conn)
+                    if config.RAIL_ENABLED and config.RTT_TOKEN:
+                        from . import rail
+                        rail.prune()
                     last_prune = cycle
             except Exception as exc:  # keep the loop alive across anything
                 print(f"[collector] unexpected error: {exc!r}", flush=True)

@@ -72,14 +72,36 @@ Three modes, three very different levels of availability. Measured, not assumed:
 | Mode | What is available | Source |
 |---|---|---|
 | **Bus / coach** | Live positions, ~175 in Bristol at any moment, updated every couple of minutes | DfT Bus Open Data Service, national GTFS-Realtime, **no key** |
-| **Rail** | Station positions only — **no live trains** | OpenStreetMap |
+| **Rail** | Live departure boards, delays, platforms, cancellations — but **no train positions** | Realtime Trains (token required) + OpenStreetMap for station coordinates |
 | **Ferry** | Pier positions only | OpenStreetMap |
 
-**Why there are no live trains.** Every UK source for real-time train positions —
-Network Rail's open data feeds, National Rail's Darwin, Realtime Trains — requires a
-registered account and credentials. None can be read anonymously, so rail is shown as
-stations rather than moving vehicles. If you register for any of them, that is the
-natural place to extend `hush/transit.py`.
+### Why trains are not dots on the map
+
+Realtime Trains returns rich live *timing* data: which services call where, forecast
+against schedule, delays, platforms, cancellations, operators and formation lengths. What
+it does not return, anywhere, is a coordinate. Neither the service responses nor the
+reference endpoints (`/data/stops`, `/data/locations_ungrouped`) carry a latitude or
+longitude — those return only codes and names.
+
+So a train cannot honestly be placed on a map from this feed, and Hush does not try.
+Instead **each station is live**: click one for its real departure board, with delays
+computed from actual forecasts. Station coordinates come from OpenStreetMap, matched to
+RTT station codes by name — 19 of Bristol's stations match, and the ones that do not are
+heritage lines (Avon Valley, the SS Great Britain railway) that are genuinely not on the
+national network.
+
+Rail is **off unless you supply a token**; nothing else changes when it is absent.
+
+```bash
+HUSH_RTT_TOKEN=your_token_here python3 -m hush.server
+```
+
+Get one from <https://api-portal.rtt.io>. The token you are issued is a long-life
+*refresh* token: Hush exchanges it for a 20-minute access token as needed. Note RTT's
+terms — **the token must never reach an end-user application**, so it is read from the
+environment, used only server-side, and never sent to the browser. Rate limits (30/min,
+750/hour) are respected: one cycle costs one request per station, every five minutes by
+default.
 
 Two things the bus feed does not hand over cleanly, both handled rather than papered over:
 
@@ -132,6 +154,10 @@ All optional, via environment variables:
 | `HUSH_TRANSIT_MAX_AGE` | `900` | Drop bus positions older than this |
 | `HUSH_TRANSIT_TRAIL` | `10800` | How long bus tracks are kept |
 | `HUSH_BBOX_*` | Greater Bristol | `MIN_LAT`, `MIN_LON`, `MAX_LAT`, `MAX_LON` |
+| `HUSH_RTT_TOKEN` | unset | Realtime Trains refresh token. Rail is skipped without it |
+| `HUSH_RAIL` | `1` | Set `0` to skip rail even with a token |
+| `HUSH_RAIL_INTERVAL` | `300` | Seconds between rail polls (one request per station) |
+| `HUSH_RAIL_RETAIN` | `259200` | How long rail service records are kept |
 
 Run the collector headless (no dashboard), or the dashboard against an existing database:
 
@@ -154,6 +180,8 @@ python3 -m hush.server --no-collector # serve only
 | `/api/transit` | Live buses and coaches |
 | `/api/transit/vehicle/<id>` | One bus: state plus its recorded track |
 | `/api/infrastructure?kind=rail_station` | Stations, stops and piers |
+| `/api/rail` | Rail stations with live service counts and average delay |
+| `/api/rail/station/<code>` | One station's live departure board |
 | `/api/leaderboard?hours=24` | Longest idle, flattest battery, fastest rented |
 | `/api/zones`, `/api/stations`, `/api/pricing` | Cached static feeds |
 
@@ -166,6 +194,7 @@ hush/          collector, analytics and server (stdlib only)
   collector.py scooter polling and event inference
   gtfsrt.py    minimal GTFS-Realtime protobuf decoder
   transit.py   buses from BODS, infrastructure from OpenStreetMap
+  rail.py      Realtime Trains: token refresh and live station boards
   analytics.py aggregations
   server.py    HTTP API + static files
 web/           dashboard (vanilla JS, Leaflet)
@@ -177,6 +206,7 @@ Pricing used for revenue estimates is Bristol's at time of writing: £1 unlock +
 read from the live `system_pricing_plans` feed.
 
 Scooter and bike data © Dott, via their public GBFS feed. Bus and coach positions © the
-operators, via the DfT Bus Open Data Service (Open Government Licence). Station, stop and
+operators, via the DfT Bus Open Data Service (Open Government Licence). Rail timings via
+Realtime Trains, subject to <https://www.realtimetrains.co.uk/legal/>. Station, stop and
 pier positions © OpenStreetMap contributors (ODbL). Basemap © OpenStreetMap contributors,
 © CARTO.

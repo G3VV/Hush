@@ -67,6 +67,19 @@ TRANSIT_MAX_AGE_S = int(os.environ.get("HUSH_TRANSIT_MAX_AGE", "900"))
 # Position trails are kept this long, then pruned.
 TRANSIT_TRAIL_S = int(os.environ.get("HUSH_TRANSIT_TRAIL", "10800"))  # 3h
 
+# --- Rail (Realtime Trains) ----------------------------------------------------
+# A long-life refresh token from https://api-portal.rtt.io. Rail is simply
+# skipped when this is unset -- nothing else changes.
+#
+# RTT's terms require the token stays server-side and never reaches a browser,
+# which is why it is read from the environment and only ever used here.
+RTT_TOKEN = os.environ.get("HUSH_RTT_TOKEN", "").strip()
+RAIL_ENABLED = os.environ.get("HUSH_RAIL", "1") != "0"
+# Each cycle costs one request per station (~19). The documented ceilings are
+# 30/minute and 750/hour, so five minutes leaves plenty of headroom.
+RAIL_POLL_INTERVAL_S = int(os.environ.get("HUSH_RAIL_INTERVAL", "300"))
+RAIL_RETAIN_S = int(os.environ.get("HUSH_RAIL_RETAIN", str(3 * 86400)))
+
 # Static infrastructure (stations, stops, ferry piers) from OpenStreetMap.
 # Overpass rate-limits aggressively, so this is cached hard.
 OVERPASS_URL = os.environ.get("HUSH_OVERPASS", "https://overpass-api.de/api/interpreter")
