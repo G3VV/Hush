@@ -104,6 +104,9 @@ Outside the track bounding box there is no geometry to route along, so those tra
 back to straight-line interpolation, are drawn with a dashed marker, and say in the panel
 that no mapped track was near enough to be confident.
 
+Clicking a train draws its whole journey: solid for the legs already travelled, dashed
+for those still to come, with every calling point marked. Both follow real track.
+
 **The limits.** This is an estimate and only as good as the timings behind it. A train
 between two widely spaced calling points, or running to a stale forecast, will drift.
 Nothing here is GPS.
@@ -132,11 +135,22 @@ Two things the bus feed does not hand over cleanly, both handled rather than pap
   reaches a full day old. Anything whose last report is older than 15 minutes
   (`HUSH_TRANSIT_MAX_AGE`) is dropped instead of being drawn as a bus that is not there.
   In practice this removes about half the vehicles inside the bounding box.
-- **Route names.** The feed carries the operator's internal GTFS `route_id` ("7444"), not
-  the number on the front of the bus. Mapping one to the other needs either a free BODS
-  API key or the 212 MB regional timetable download, so the internal ID is shown as-is
-  rather than guessed at. The server does not support range requests, so there is no
-  cheap way to pull just `routes.txt` out of that archive.
+- **Route names.** The open feed carries only the operator's internal `route_id`
+  ("7444"). With a free BODS key (`HUSH_BODS_KEY`) the SIRI-VM feed supplies the number
+  on the front of the bus — m1, A1, 75 — plus origin and destination, matched to the
+  GTFS-RT vehicles by their shared vehicle reference.
+
+### Where a bus has been, and where it is going
+
+The **past** is measured: the positions actually recorded for that vehicle. The
+**future** is the operator's own route alignment, taken from the TransXChange timetables
+on BODS, which carry the real road geometry, and cut at the point on that line nearest
+the bus. It is where the bus is *routed* to go, not a prediction of when it arrives, and
+it is drawn dashed to say so.
+
+Line numbers repeat across the country — a "24" exists in a dozen places — so shapes are
+kept only where they overlap the Bristol area. Without that filter a Stagecoach 24 from
+another region matched, putting the route 59 km out to sea.
 
 Unlike the scooters, **bus fleet numbers are stable**, so buses genuinely can be followed:
 each one has a recorded track, a real distance travelled, and a speed derived between
@@ -193,6 +207,7 @@ All optional, via environment variables or `.env`:
 | `HUSH_TRANSIT` | `1` | Set `0` to skip buses entirely |
 | `HUSH_TRANSIT_INTERVAL` | `120` | Seconds between bus polls. The national feed is ~2 MB a fetch |
 | `HUSH_TRANSIT_MAX_AGE` | `900` | Drop bus positions older than this |
+| `HUSH_BODS_KEY` | unset | BODS API key: adds route numbers and route geometry |
 | `HUSH_TRANSIT_TRAIL` | `10800` | How long bus tracks are kept |
 | `HUSH_BBOX_*` | Greater Bristol | `MIN_LAT`, `MIN_LON`, `MAX_LAT`, `MAX_LON` |
 | `HUSH_RTT_TOKEN` | unset | Realtime Trains refresh token. Rail is skipped without it |

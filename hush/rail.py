@@ -584,6 +584,41 @@ def _calling_points(service):
     return points
 
 
+def _journey_path(points, leg_index, fraction):
+    """The whole journey as track geometry, split at the train's position.
+
+    Returns (past, future) as [[lat, lon], ...]. Each leg between consecutive
+    calling points is routed along the railway; legs we cannot route (outside
+    the geometry we hold) fall back to a straight hop so the line stays
+    continuous rather than disappearing.
+    """
+    def leg_points(a, b):
+        if a["lat"] is None or b["lat"] is None:
+            return None
+        path = route_between(a["lat"], a["lon"], b["lat"], b["lon"],
+                             key=(a["code"], b["code"]))
+        if path and len(path) > 1:
+            return [[round(p[0], 5), round(p[1], 5)] for p in path]
+        return [[round(a["lat"], 5), round(a["lon"], 5)],
+                [round(b["lat"], 5), round(b["lon"], 5)]]
+
+    past, future = [], []
+    for i in range(len(points) - 1):
+        seg = leg_points(points[i], points[i + 1])
+        if not seg:
+            continue
+        if i < leg_index:
+            past.extend(seg)
+        elif i > leg_index:
+            future.extend(seg)
+        else:
+            # The leg the train is on: split it at the current fraction.
+            cut = max(1, min(len(seg) - 1, int(round(len(seg) * fraction))))
+            past.extend(seg[:cut + 1])
+            future.extend(seg[cut:])
+    return past, future
+
+
 def position_from_service(service, now=None):
     """Estimate where one train is. Returns a dict, or None if not placeable."""
     now = now or int(time.time())
@@ -613,11 +648,17 @@ def position_from_service(service, now=None):
     }
 
     if at is not None:
+        idx = points.index(at)
+        past, future = _journey_path(points, leg_index=idx, fraction=0.0)
         return dict(base, lat=at["lat"], lon=at["lon"], bearing=None,
                     from_code=at["code"], to_code=at["code"],
                     from_name=at["name"], to_name=at["name"],
                     progress=0.0, state="at_station", basis=at["basis"],
-                    snapped_m=None, leg_start_ts=at["arr"], leg_end_ts=at["dep"])
+                    snapped_m=None, leg_start_ts=at["arr"], leg_end_ts=at["dep"],
+                    path_past=past, path_future=future,
+                    calls=[{"code": p["code"], "name": p["name"], "arr": p["arr"],
+                            "dep": p["dep"], "lat": p["lat"], "lon": p["lon"]}
+                           for p in points])
 
     if leg is None:
         return None
@@ -648,11 +689,17 @@ def position_from_service(service, now=None):
         if dist is not None and dist <= config.TRACK_SNAP_MAX_M:
             lat, lon, moved = snapped_lat, snapped_lon, dist
 
+    past, future = _journey_path(points, leg_index=points.index(a), fraction=frac)
+
     return dict(base, lat=lat, lon=lon, bearing=bearing,
                 from_code=a["code"], to_code=b["code"],
                 from_name=a["name"], to_name=b["name"],
                 progress=frac, state="between", basis=a["basis"],
-                snapped_m=moved, leg_start_ts=a["dep"], leg_end_ts=b["arr"])
+                snapped_m=moved, leg_start_ts=a["dep"], leg_end_ts=b["arr"],
+                path_past=past, path_future=future,
+                calls=[{"code": p["code"], "name": p["name"], "arr": p["arr"],
+                        "dep": p["dep"], "lat": p["lat"], "lon": p["lon"]}
+                       for p in points])
 
 
 def fetch_service(unique_identity, token):
@@ -721,7 +768,10 @@ def position_trains():
                      pos["bearing"], pos["from_code"], pos["to_code"],
                      pos["from_name"], pos["to_name"], pos["progress"], delay,
                      pos["state"], pos["basis"], pos["snapped_m"],
-                     pos["leg_start_ts"], pos["leg_end_ts"], now))
+                     pos["leg_start_ts"], pos["leg_end_ts"], now,
+                     json.dumps(pos.get("path_past") or []),
+                     json.dumps(pos.get("path_future") or []),
+                     json.dumps(pos.get("calls") or [])))
         placed += 1
 
     conn = db.connect()
@@ -730,8 +780,9 @@ def position_trains():
         conn.executemany(
             "INSERT INTO train_positions(uid, headcode, operator, origin, destination, "
             "lat, lon, bearing, from_code, to_code, from_name, to_name, progress, "
-            "delay_min, state, basis, snapped_m, leg_start_ts, leg_end_ts, computed_ts) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "delay_min, state, basis, snapped_m, leg_start_ts, leg_end_ts, computed_ts, "
+            "path_past, path_future, calls) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(uid) DO UPDATE SET "
             " lat=excluded.lat, lon=excluded.lon, bearing=excluded.bearing,"
             " from_code=excluded.from_code, to_code=excluded.to_code,"
@@ -739,7 +790,8 @@ def position_trains():
             " progress=excluded.progress, delay_min=excluded.delay_min,"
             " state=excluded.state, basis=excluded.basis, snapped_m=excluded.snapped_m,"
             " leg_start_ts=excluded.leg_start_ts, leg_end_ts=excluded.leg_end_ts,"
-            " computed_ts=excluded.computed_ts", rows)
+            " computed_ts=excluded.computed_ts, path_past=excluded.path_past,"
+            " path_future=excluded.path_future, calls=excluded.calls", rows)
     conn.commit()
     print(f"[rail] positioned {placed} trains of {len(candidates)} candidates"
           + (" (rate budget reached)" if budget_stop else ""), flush=True)
