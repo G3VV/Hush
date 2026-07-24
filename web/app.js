@@ -113,12 +113,13 @@ function renderLegend() {
     enc.labels.map((l, i) =>
       `<div class="legend-row"><span class="legend-swatch" style="background:${cols[i]}"></span>${l}</div>`
     ).join('') +
-    /* Shape legend: mode is encoded by shape, so it needs saying once. */
-    `<div class="ctl-label" style="margin-top:11px">Shape</div>
-     <div class="legend-row"><span class="legend-swatch" style="background:${css('--text-muted')}"></span>Round — scooter or bike</div>
+    /* Mode legend. Each transport type differs in shape, size and colour at
+       once, so the three cues reinforce rather than compete. */
+    `<div class="ctl-label" style="margin-top:12px">Transport type</div>
+     <div class="legend-row"><span class="legend-mode-scooter"></span>Small dot — scooter or bike</div>
      <div class="legend-row"><span class="legend-shape-arrow"></span>Arrow — bus, pointing its way</div>
-     <div class="legend-row"><span class="legend-shape-square"></span>Square — station or stop</div>
-     <div class="legend-row"><span class="legend-shape-train"></span>Bar — train (estimated position)</div>`;
+     <div class="legend-row"><span class="legend-shape-train"></span>Bar — train (estimated position)</div>
+     <div class="legend-row"><span class="legend-shape-square"></span>Outlined square — station</div>`;
 }
 
 /* ── map ────────────────────────────────────────────────────────────── */
@@ -131,11 +132,18 @@ const ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStree
              '&copy; <a href="https://carto.com/attributions">CARTO</a> · vehicle data: Dott GBFS';
 
 function initMap(center, zoom) {
-  /* Zoom sits bottom-right so it never collides with the control panel. */
-  state.map = L.map('map', { zoomControl: false, preferCanvas: true })
-               .setView(center, zoom);
-  L.control.zoom({ position: 'bottomright' }).addTo(state.map);
+  /* One shared canvas for every vector layer. If layers are left to create
+     their own, Leaflet stacks a second canvas over the vehicles one, and the
+     upper canvas swallows clicks meant for the markers underneath — which
+     silently breaks scooter clicks the moment anything draws a trail. */
   state.renderer = L.canvas({ padding: 0.5 });
+  /* Zoom sits bottom-right so it never collides with the control panel. */
+  state.map = L.map('map', {
+    zoomControl: false,
+    preferCanvas: true,
+    renderer: state.renderer,
+  }).setView(center, zoom);
+  L.control.zoom({ position: 'bottomright' }).addTo(state.map);
   setTiles();
 
   state.layers.vehicles = L.layerGroup().addTo(state.map);
@@ -165,8 +173,10 @@ function setTiles() {
 }
 
 function radiusForZoom() {
+  /* Scooters are by far the most numerous mark, so they are kept small and
+     read as a background field; buses and trains sit above them. */
   const z = state.map.getZoom();
-  return z >= 17 ? 8 : z >= 15 ? 5.5 : z >= 13 ? 4 : 3;
+  return z >= 17 ? 7 : z >= 15 ? 5 : z >= 13 ? 3.5 : 2.5;
 }
 
 function drawVehicles() {
@@ -185,7 +195,7 @@ function drawVehicles() {
       color: v.id === state.selected ? css('--text-primary') : strokeCol,
       weight: v.id === state.selected ? 2.5 : 1.5,
       fillColor: colorOf(v),
-      fillOpacity: v.d ? 0.35 : 0.92,
+      fillOpacity: v.d ? 0.3 : 0.8,
       bubblingMouseEvents: false,
     });
     m.bindTooltip(
@@ -421,17 +431,17 @@ async function loadBuses() {
 function drawBuses() {
   const g = state.layers.buses;
   g.clearLayers();
-  const col = css('--series-3');
+  const col = css('--bus-body');
 
   for (const b of state.buses) {
     const known = b.brg != null;
     // A bus with a known heading gets a pointed arrow; without one it gets a
     // neutral dot, so the shape never implies a direction we do not have.
     const html = known
-      ? `<div class="bus-arrow" style="transform:rotate(${b.brg}deg);border-bottom-color:${col}"></div>`
-      : `<div class="bus-dot" style="background:${col}"></div>`;
+      ? `<div class="bus-arrow" style="transform:rotate(${b.brg}deg)"></div>`
+      : `<div class="bus-dot"></div>`;
     const m = L.marker([b.lat, b.lon], {
-      icon: L.divIcon({ className: 'bus-icon', html, iconSize: [14, 14], iconAnchor: [7, 7] }),
+      icon: L.divIcon({ className: 'bus-icon', html, iconSize: [16, 16], iconAnchor: [8, 8] }),
       keyboard: false,
     });
     m.bindTooltip(
@@ -548,6 +558,7 @@ async function loadRail(layer) {
   }
   for (const s of stations) {
     const busy = s.services > 0;
+    /* Filled = services due, strongly filled = running late. No hue: see CSS. */
     const late = s.avg_delay != null && s.avg_delay > 5;
     L.marker([s.lat, s.lon], {
       icon: L.divIcon({
@@ -585,14 +596,15 @@ function drawTrains() {
   g.clearLayers();
   for (const t of state.trains) {
     const late = t.delay != null && t.delay > 5;
-    const col = late ? css('--bat-low') : css('--series-1');
+    /* Body colour is the mode's identity and never changes; lateness is a
+       ring around it, so a delayed train still reads as a train. */
     const cls = 'train-mark' + (t.state === 'at_station' ? ' is-stopped' : '') +
-                (t.on_track ? '' : ' is-offtrack');
+                (t.on_track ? '' : ' is-offtrack') + (late ? ' is-late' : '');
     const m = L.marker([t.lat, t.lon], {
       icon: L.divIcon({
         className: 'train-icon',
-        html: `<div class="${cls}" style="background:${col};${t.brg != null ? `transform:rotate(${t.brg}deg)` : ''}"></div>`,
-        iconSize: [16, 16], iconAnchor: [8, 8],
+        html: `<div class="${cls}"${t.brg != null ? ` style="transform:rotate(${t.brg}deg)"` : ''}></div>`,
+        iconSize: [18, 22], iconAnchor: [9, 11],
       }),
       zIndexOffset: 500,
       keyboard: false,
