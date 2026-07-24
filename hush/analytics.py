@@ -1,0 +1,348 @@
+"""Aggregations over the collected fleet history.
+
+A note on what is knowable. Dott rotates `bike_id` after every rental (the GBFS
+spec asks operators to, so that riders cannot be followed between trips). So a
+vehicle that leaves the feed never returns under the same id. We can observe
+that a rental STARTED at one place and that another ENDED somewhere else, but
+never which start belongs to which end. Nothing here pretends otherwise:
+origin-destination pairs are not reconstructed, and ride duration is derived
+statistically rather than measured per vehicle.
+"""
+
+import json
+import time
+
+from . import db
+
+# Bristol pricing at time of writing: GBP 1 unlock + GBP 0.25/min, both modes.
+UNLOCK_GBP = 1.00
+PER_MIN_GBP = 0.25
+
+# Counting how many vehicles are out being ridden is not as simple as counting
+# the ones missing from the feed: because ids retire on rental, missing ids pile
+# up forever. Instead we take the largest available-count ever seen as the size
+# of the deployed fleet (at the quietest hour nearly everything is parked), and
+# read concurrent rides as the shortfall against it. That needs to have seen at
+# least one overnight lull to be meaningful.
+MIN_SPAN_FOR_RIDE_EST_S = 12 * 3600
+MIN_PICKUPS_FOR_RIDE_EST = 100
+
+
+def _hist(values, edges):
+    """Bucket values into [edges[i], edges[i+1]) plus a final overflow bucket."""
+    out = [0] * len(edges)
+    for v in values:
+        if v is None:
+            continue
+        for i in range(len(edges) - 1, -1, -1):
+            if v >= edges[i]:
+                out[i] += 1
+                break
+    return out
+
+
+def _median(xs):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def live_vehicles(vtype=None, min_fuel=None, max_fuel=None, status=None, limit=6000):
+    sql = ("SELECT bike_id, vehicle_type_id, lat, lon, fuel, range_m, is_disabled, "
+           "is_reserved, parked_since, last_seen, last_reported, trip_count, "
+           "trip_distance_m FROM vehicles WHERE present=1")
+    args = []
+    if vtype in ("dott_scooter", "dott_bicycle"):
+        sql += " AND vehicle_type_id=?"
+        args.append(vtype)
+    if min_fuel is not None:
+        sql += " AND fuel >= ?"
+        args.append(min_fuel / 100.0)
+    if max_fuel is not None:
+        sql += " AND fuel <= ?"
+        args.append(max_fuel / 100.0)
+    if status == "disabled":
+        sql += " AND is_disabled=1"
+    elif status == "reserved":
+        sql += " AND is_reserved=1"
+    sql += " LIMIT ?"
+    args.append(limit)
+
+    now = int(time.time())
+    out = []
+    for r in db.rows(sql, tuple(args)):
+        out.append({
+            "id": r["bike_id"],
+            "t": 1 if r["vehicle_type_id"] == "dott_bicycle" else 0,
+            "lat": round(r["lat"], 6),
+            "lon": round(r["lon"], 6),
+            "f": round((r["fuel"] or 0) * 100),
+            "km": round((r["range_m"] or 0) / 1000.0, 1),
+            "d": r["is_disabled"] or 0,
+            "r": r["is_reserved"] or 0,
+            "idle": now - (r["parked_since"] or now),
+            "trips": r["trip_count"] or 0,
+        })
+    return out
+
+
+def vehicle_detail(bike_id, history_limit=60):
+    """Everything observable about one vehicle *under its current id*.
+
+    The id is retired the moment someone rents it, so this history covers the
+    current parked spell: how long it has sat, how the battery has drained, and
+    any operational moves (which keep the id, since no rental took place).
+    """
+    v = db.one("SELECT * FROM vehicles WHERE bike_id=?", (bike_id,))
+    if not v:
+        return None
+    now = int(time.time())
+    moves = db.rows(
+        "SELECT id, start_lat, start_lon, end_lat, end_lon, start_ts, end_ts, "
+        "duration_s, distance_m, fuel_start, fuel_end, fuel_delta, kind, confidence "
+        "FROM trips WHERE bike_id=? ORDER BY end_ts DESC LIMIT ?",
+        (bike_id, history_limit),
+    )
+    stays = db.rows(
+        "SELECT id, lat, lon, start_ts, end_ts, start_fuel, end_fuel, is_open "
+        "FROM parkings WHERE bike_id=? ORDER BY start_ts DESC LIMIT ?",
+        (bike_id, history_limit),
+    )
+    total_m = sum(m["distance_m"] for m in moves)
+    first = v["first_seen"] or now
+    drain = None
+    open_stay = next((s for s in stays if s["is_open"]), None)
+    if open_stay and open_stay["start_fuel"] is not None and v["fuel"] is not None:
+        hours = max(1.0, (now - open_stay["start_ts"]) / 3600.0)
+        drain = round((open_stay["start_fuel"] - v["fuel"]) * 100 / hours, 2)
+
+    return {
+        "id": v["bike_id"],
+        "type": v["vehicle_type_id"],
+        "present": bool(v["present"]),
+        "lat": v["lat"], "lon": v["lon"],
+        "fuel": v["fuel"], "range_m": v["range_m"],
+        "is_disabled": bool(v["is_disabled"]),
+        "is_reserved": bool(v["is_reserved"]),
+        "first_seen": first, "last_seen": v["last_seen"],
+        "last_reported": v["last_reported"],
+        "parked_since": v["parked_since"],
+        "idle_s": now - (v["parked_since"] or now) if v["present"] else None,
+        "tracked_s": now - first,
+        "gone_since": v["last_seen"] if not v["present"] else None,
+        "battery_drain_pct_per_h": drain,
+        "move_count": len(moves),
+        "total_distance_m": total_m,
+        "rental_uri": f"https://go.ridedott.com/vehicles/{v['bike_id']}",
+        "moves": moves,
+        "stays": stays,
+    }
+
+
+def overview(hours=24):
+    now = int(time.time())
+    since = now - hours * 3600
+
+    present = db.scalar("SELECT COUNT(*) FROM vehicles WHERE present=1", default=0)
+    # Deployed fleet size, taken as the high-water mark of availability.
+    peak_available = db.scalar("SELECT MAX(available) FROM fleet_samples", default=present) or present
+    riding = max(0, peak_available - present)
+    scooters = db.scalar(
+        "SELECT COUNT(*) FROM vehicles WHERE present=1 AND vehicle_type_id='dott_scooter'",
+        default=0)
+    bikes = db.scalar(
+        "SELECT COUNT(*) FROM vehicles WHERE present=1 AND vehicle_type_id='dott_bicycle'",
+        default=0)
+    disabled = db.scalar(
+        "SELECT COUNT(*) FROM vehicles WHERE present=1 AND is_disabled=1", default=0)
+    avg_fuel = db.scalar("SELECT AVG(fuel) FROM vehicles WHERE present=1", default=0) or 0
+    low = db.scalar("SELECT COUNT(*) FROM vehicles WHERE present=1 AND fuel < 0.2", default=0)
+
+    fuels = [r["fuel"] * 100 for r in db.rows(
+        "SELECT fuel FROM vehicles WHERE present=1 AND fuel IS NOT NULL")]
+    battery_hist = _hist(fuels, [0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+
+    idles = [(now - r["parked_since"]) / 3600.0 for r in db.rows(
+        "SELECT parked_since FROM vehicles WHERE present=1 AND parked_since IS NOT NULL")]
+    idle_hist = _hist(idles, [0, 1, 3, 6, 12, 24, 48, 72])
+
+    # --- rental events ---------------------------------------------------
+    events = db.rows(
+        "SELECT ts, kind, dwell_s, vehicle_type_id FROM events WHERE ts >= ?", (since,))
+    pickups = [e for e in events if e["kind"] == "pickup"]
+    dropoffs = [e for e in events if e["kind"] == "dropoff"]
+
+    first_poll = db.scalar("SELECT MIN(ts) FROM polls WHERE ok=1")
+    span = max(1, now - max(since, first_poll or since))
+
+    by_hour = {}
+    for e in events:
+        h = (e["ts"] // 3600) * 3600
+        slot = by_hour.setdefault(h, {"ts": h, "pickups": 0, "dropoffs": 0})
+        slot["pickups" if e["kind"] == "pickup" else "dropoffs"] += 1
+    hourly = [by_hour[k] for k in sorted(by_hour)]
+
+    samples = db.rows(
+        # in_use is still recorded as a raw count but is not exposed: it counts
+        # retired ids as well as riding ones, so `riding` below supersedes it.
+        "SELECT ts, available, scooters, bicycles, avg_fuel, low_battery "
+        "FROM fleet_samples WHERE ts >= ? ORDER BY ts", (since,))
+
+    # Concurrent rides per sample, as the shortfall against the deployed fleet.
+    for s in samples:
+        s["riding"] = max(0, peak_available - (s["available"] or peak_available))
+
+    # Mean ride duration by Little's Law: with L vehicles out at any moment and
+    # rentals starting at rate lambda, the average ride lasts L / lambda. This
+    # sidesteps the id rotation entirely -- it needs only counts, never a link
+    # between a particular start and a particular end.
+    total_observed = (now - first_poll) if first_poll else 0
+    mean_riding = (sum(s["riding"] for s in samples) / len(samples)) if samples else riding
+    rate_per_s = len(pickups) / span
+    reliable = (total_observed >= MIN_SPAN_FOR_RIDE_EST_S
+                and len(pickups) >= MIN_PICKUPS_FOR_RIDE_EST)
+    est_ride_s = (mean_riding / rate_per_s) if (rate_per_s > 0 and reliable) else None
+
+    dwells = [p["dwell_s"] / 3600.0 for p in pickups if p["dwell_s"] is not None]
+    dwell_hist = _hist(dwells, [0, 0.25, 0.5, 1, 2, 4, 8, 24])
+    med_dwell = _median([p["dwell_s"] for p in pickups if p["dwell_s"] is not None])
+
+    est_rev = None
+    if est_ride_s is not None:
+        est_rev = round(len(pickups) * (UNLOCK_GBP + (est_ride_s / 60.0) * PER_MIN_GBP), 2)
+
+    moves = db.rows("SELECT kind FROM trips WHERE end_ts >= ?", (since,))
+    kinds = {}
+    for m in moves:
+        kinds[m["kind"]] = kinds.get(m["kind"], 0) + 1
+
+    poll_count = db.scalar("SELECT COUNT(*) FROM polls WHERE ok=1", default=0)
+
+    return {
+        "generated_at": now,
+        "window_hours": hours,
+        "coverage": {
+            "first_poll": first_poll,
+            "polls": poll_count,
+            "observing_s": (now - first_poll) if first_poll else 0,
+            "window_span_s": span,
+            "last_poll": db.one("SELECT * FROM polls ORDER BY ts DESC LIMIT 1"),
+        },
+        "fleet": {
+            "available": present,
+            "riding": riding,
+            "peak_available": peak_available,
+            "scooters": scooters,
+            "bicycles": bikes,
+            "disabled": disabled,
+            "avg_fuel_pct": round(avg_fuel * 100, 1),
+            "low_battery": low,
+            "utilisation_pct": round(100.0 * riding / peak_available, 1) if peak_available else 0.0,
+        },
+        "activity": {
+            "rentals_started": len(pickups),
+            "rentals_ended": len(dropoffs),
+            "per_hour": round(len(pickups) / (span / 3600.0), 1) if span else 0,
+            "per_vehicle_per_day": round(
+                (len(pickups) / (span / 86400.0)) / present, 2) if present and span else 0,
+            "est_ride_min": round(est_ride_s / 60.0, 1) if est_ride_s else None,
+            "est_ride_reliable": reliable,
+            "needs_hours_for_estimate": round(
+                max(0, MIN_SPAN_FOR_RIDE_EST_S - total_observed) / 3600.0, 1),
+            "mean_concurrent_rides": round(mean_riding, 1),
+            "median_dwell_s": med_dwell,
+            "est_revenue_gbp": est_rev,
+            "ops_moves": kinds,
+        },
+        "charts": {
+            "battery_hist": battery_hist,
+            "idle_hist": idle_hist,
+            "dwell_hist": dwell_hist,
+            "hourly": hourly,
+            "fleet_samples": samples,
+        },
+    }
+
+
+def hotspots(hours=24, kind="pickup", cell=0.002, limit=300):
+    """Grid-cluster rental events. cell=0.002 deg is roughly 220m."""
+    since = int(time.time()) - hours * 3600
+    grid = {}
+    for r in db.rows(
+        "SELECT lat, lon FROM events WHERE kind=? AND ts >= ? "
+        "AND lat IS NOT NULL", (kind, since)
+    ):
+        key = (round(r["lat"] / cell), round(r["lon"] / cell))
+        g = grid.setdefault(key, [0, 0.0, 0.0])
+        g[0] += 1
+        g[1] += r["lat"]
+        g[2] += r["lon"]
+    out = [{"lat": round(v[1] / v[0], 6), "lon": round(v[2] / v[0], 6), "n": v[0]}
+           for v in grid.values()]
+    out.sort(key=lambda d: -d["n"])
+    return out[:limit]
+
+
+def balance(hours=24, cell=0.004, limit=300):
+    """Net gain/loss of vehicles per area: where rebalancing is needed.
+
+    Positive means more rentals ended there than started -- vehicles pile up.
+    Negative means the area drains.
+    """
+    since = int(time.time()) - hours * 3600
+    grid = {}
+    for r in db.rows(
+        "SELECT lat, lon, kind FROM events WHERE ts >= ? AND lat IS NOT NULL", (since,)
+    ):
+        key = (round(r["lat"] / cell), round(r["lon"] / cell))
+        g = grid.setdefault(key, {"in": 0, "out": 0, "la": 0.0, "lo": 0.0, "n": 0})
+        g["in" if r["kind"] == "dropoff" else "out"] += 1
+        g["la"] += r["lat"]
+        g["lo"] += r["lon"]
+        g["n"] += 1
+    out = [{"lat": round(v["la"] / v["n"], 6), "lon": round(v["lo"] / v["n"], 6),
+            "net": v["in"] - v["out"], "in": v["in"], "out": v["out"]}
+           for v in grid.values()]
+    out.sort(key=lambda d: -abs(d["net"]))
+    return out[:limit]
+
+
+def recent_events(hours=24, limit=100, kind=None):
+    since = int(time.time()) - hours * 3600
+    sql = ("SELECT id, ts, kind, bike_id, vehicle_type_id, lat, lon, fuel, dwell_s "
+           "FROM events WHERE ts >= ?")
+    args = [since]
+    if kind in ("pickup", "dropoff"):
+        sql += " AND kind=?"
+        args.append(kind)
+    sql += " ORDER BY ts DESC LIMIT ?"
+    args.append(limit)
+    return db.rows(sql, tuple(args))
+
+
+def leaderboard(hours=24, limit=25):
+    """Vehicles worth an operator's attention."""
+    now = int(time.time())
+    stranded = db.rows(
+        "SELECT bike_id, vehicle_type_id, fuel, lat, lon, parked_since, "
+        "? - parked_since AS idle_s FROM vehicles "
+        "WHERE present=1 AND parked_since IS NOT NULL "
+        "ORDER BY parked_since ASC LIMIT ?", (now, limit))
+    flat = db.rows(
+        "SELECT bike_id, vehicle_type_id, fuel, lat, lon, parked_since, "
+        "? - parked_since AS idle_s FROM vehicles "
+        "WHERE present=1 AND fuel IS NOT NULL "
+        "ORDER BY fuel ASC LIMIT ?", (now, limit))
+    since = now - hours * 3600
+    quickest = db.rows(
+        "SELECT bike_id, vehicle_type_id, lat, lon, fuel, dwell_s, ts FROM events "
+        "WHERE kind='pickup' AND ts >= ? AND dwell_s IS NOT NULL "
+        "ORDER BY dwell_s ASC LIMIT ?", (since, limit))
+    return {"stranded": stranded, "flat": flat, "quickest": quickest}
+
+
+def static_feed(name):
+    r = db.one("SELECT payload FROM static_feeds WHERE name=?", (name,))
+    return json.loads(r["payload"]) if r else None

@@ -1,0 +1,166 @@
+"""SQLite storage for observed fleet state, parkings and inferred trips."""
+
+import os
+import sqlite3
+import threading
+
+from . import config
+
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+
+CREATE TABLE IF NOT EXISTS polls (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                INTEGER NOT NULL,
+    feed_last_updated INTEGER,
+    vehicle_count     INTEGER,
+    appeared          INTEGER,
+    vanished          INTEGER,
+    trips_found       INTEGER,
+    duration_ms       INTEGER,
+    ok                INTEGER DEFAULT 1,
+    error             TEXT
+);
+CREATE INDEX IF NOT EXISTS polls_ts ON polls(ts);
+
+-- One row per vehicle, updated in place: the live fleet.
+CREATE TABLE IF NOT EXISTS vehicles (
+    bike_id         TEXT PRIMARY KEY,
+    vehicle_type_id TEXT,
+    pricing_plan_id TEXT,
+    first_seen      INTEGER,
+    last_seen       INTEGER,
+    present         INTEGER DEFAULT 1,   -- in the most recent feed?
+    lat             REAL,
+    lon             REAL,
+    fuel            REAL,
+    range_m         INTEGER,
+    is_disabled     INTEGER,
+    is_reserved     INTEGER,
+    last_reported   INTEGER,
+    parked_since    INTEGER,             -- start of the current stay
+    trip_count      INTEGER DEFAULT 0,
+    trip_distance_m REAL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS vehicles_present ON vehicles(present);
+CREATE INDEX IF NOT EXISTS vehicles_type ON vehicles(vehicle_type_id);
+
+-- A continuous period during which a vehicle sat at one spot, available.
+CREATE TABLE IF NOT EXISTS parkings (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    bike_id    TEXT NOT NULL,
+    lat        REAL,
+    lon        REAL,
+    start_ts   INTEGER,
+    end_ts     INTEGER,
+    start_fuel REAL,
+    end_fuel   REAL,
+    is_open    INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS parkings_bike ON parkings(bike_id, start_ts DESC);
+CREATE INDEX IF NOT EXISTS parkings_open ON parkings(is_open);
+
+-- Movement between two stays. Inferred, never reported by the API.
+CREATE TABLE IF NOT EXISTS trips (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    bike_id         TEXT NOT NULL,
+    vehicle_type_id TEXT,
+    start_lat       REAL, start_lon REAL,
+    end_lat         REAL, end_lon   REAL,
+    start_ts        INTEGER, end_ts INTEGER,
+    duration_s      INTEGER,
+    distance_m      REAL,
+    fuel_start      REAL, fuel_end  REAL, fuel_delta REAL,
+    kind            TEXT,      -- trip | relocation | service | drift
+    confidence      REAL
+);
+CREATE INDEX IF NOT EXISTS trips_bike ON trips(bike_id, end_ts DESC);
+CREATE INDEX IF NOT EXISTS trips_end ON trips(end_ts DESC);
+CREATE INDEX IF NOT EXISTS trips_kind ON trips(kind, end_ts DESC);
+
+-- Cached static feeds (zones, stations, pricing) as raw JSON.
+CREATE TABLE IF NOT EXISTS static_feeds (
+    name       TEXT PRIMARY KEY,
+    fetched_at INTEGER,
+    payload    TEXT
+);
+
+-- Fleet-wide rollup, one row per poll, for the timeline charts.
+CREATE TABLE IF NOT EXISTS fleet_samples (
+    ts            INTEGER PRIMARY KEY,
+    available     INTEGER,
+    scooters      INTEGER,
+    bicycles      INTEGER,
+    disabled      INTEGER,
+    reserved      INTEGER,
+    avg_fuel      REAL,
+    low_battery   INTEGER,
+    in_use        INTEGER    -- absent and recently seen: taken to be riding
+);
+
+-- Rental events. Dott rotates bike_id after every rental, so a vehicle that
+-- goes out never comes back under the same id: we can see that a rental
+-- STARTED here and that one ENDED there, but not which start goes with which
+-- end. These are those one-sided observations.
+CREATE TABLE IF NOT EXISTS events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL,
+    kind            TEXT NOT NULL,   -- pickup (left the feed) | dropoff (new id appeared)
+    bike_id         TEXT,
+    vehicle_type_id TEXT,
+    lat             REAL,
+    lon             REAL,
+    fuel            REAL,
+    dwell_s         INTEGER          -- pickup only: how long it had been parked
+);
+CREATE INDEX IF NOT EXISTS events_ts ON events(ts DESC);
+CREATE INDEX IF NOT EXISTS events_kind ON events(kind, ts DESC);
+"""
+
+# Columns added after the first release; applied on every start.
+MIGRATIONS = [
+    "ALTER TABLE fleet_samples ADD COLUMN in_use INTEGER",
+]
+
+_local = threading.local()
+
+
+def connect():
+    """Per-thread connection. SQLite objects are not shareable across threads."""
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
+        conn = sqlite3.connect(config.DB_PATH, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        _local.conn = conn
+    return conn
+
+
+def init():
+    conn = connect()
+    conn.executescript(SCHEMA)
+    for stmt in MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # already applied
+    conn.commit()
+    return conn
+
+
+def rows(sql, args=()):
+    return [dict(r) for r in connect().execute(sql, args).fetchall()]
+
+
+def one(sql, args=()):
+    r = connect().execute(sql, args).fetchone()
+    return dict(r) if r else None
+
+
+def scalar(sql, args=(), default=None):
+    r = connect().execute(sql, args).fetchone()
+    if not r or r[0] is None:
+        return default
+    return r[0]
