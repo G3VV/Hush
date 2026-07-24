@@ -196,14 +196,18 @@ input[type=range] { width: 100%; accent-color: var(--series-1); }
 /* Trains: a carriage-like bar, distinct from the bus arrow, because these are
    estimated positions rather than reported ones. */
 .train-icon { background: none; border: 0; }
+/* The long axis runs vertically so that rotate(bearing) reads as a compass
+   heading — 0deg is north, matching the bus arrows. A bar lying east-west at
+   0deg would render every train 90 degrees out. */
 .train-mark {
-  width: 16px; height: 8px; margin-top: 4px;
+  width: 8px; height: 16px; margin-left: 4px;
   border-radius: 3px;
   border: 1.5px solid var(--surface-1);
   box-sizing: border-box;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, .25);
+  transform-origin: 50% 50%;
 }
-.train-mark.is-stopped { width: 10px; margin-left: 3px; opacity: .85; }
+.train-mark.is-stopped { height: 10px; margin-top: 3px; opacity: .85; }
 /* Not snapped to mapped track: the estimate is looser, so say so visually. */
 .train-mark.is-offtrack { border-style: dashed; opacity: .75; }
 
