@@ -1,19 +1,26 @@
 # Hush
 
-Live map and analytics for getting around **Bristol**: Dott's e-scooters and e-bikes, plus
-every bus and coach on the road, plus the rail network.
+A live map of how **Bristol** moves. Shared scooters and bikes, every bus and coach on
+the road, and the rail network — on one map, from open data.
 
-- **Map** — ~3,100 rentable Dott vehicles and ~175 live buses at once. Mode is drawn by
-  shape (circles are scooters, arrows are buses pointing their heading, squares are
-  stations), leaving colour free to mean battery level. Everything is clickable.
-  Overlays: geofencing zones, parking bays, rental hotspots, rebalancing pressure,
-  rail stations, bus stops, ferry piers.
-- **Analytics** — fleet size, rentals per hour, demand by hour of day, battery
-  distribution, dead stock, wait times, spatial spread, and a public transport section
-  (buses live, moving, by operator, speed distribution).
-- **Fleet** — the same data as sortable tables: longest idle, flattest battery, fastest rented.
+| Mode | What you see |
+|---|---|
+| **Scooters & bikes** | ~3,100 rentable vehicles, battery, idle time, rental hotspots |
+| **Buses & coaches** | ~175 live, route number, recorded track and the road ahead |
+| **Trains** | Estimated positions on the railway, journey paths, live station boards |
+| **Infrastructure** | Rail stations, bus stops, ferry piers, geofencing zones, parking bays |
 
-Every data source is open and **none needs an API key**.
+Mode is drawn by shape — small dots are scooters, arrows are buses pointing their
+heading, bars are trains, squares are stations — so colour stays free to mean battery
+level. Everything on the map is clickable.
+
+Alongside the map: an **Analytics** tab covering rentals, demand by hour, battery and
+dead stock, bus operators and speeds, and rail punctuality; and a **Scooters** tab with
+the fleet as sortable tables.
+
+The core runs with **no API keys at all**. Two optional keys add more:
+a free [BODS](https://data.bus-data.dft.gov.uk) key for bus route numbers and route
+geometry, and a [Realtime Trains](https://api-portal.rtt.io) token for rail.
 
 No dependencies beyond the Python standard library. Leaflet loads from a CDN; run
 `sh scripts/vendor-leaflet.sh` to keep a local copy instead, which the page picks up
@@ -25,9 +32,10 @@ python3 -m hush.server          # collector + dashboard on http://127.0.0.1:8000
 
 Then open <http://127.0.0.1:8000>. Data lands in `data/hush.db` (SQLite).
 
-## What the API can and cannot tell you
+## Shared scooters and bikes
 
-This matters more than anything else in the project, so it is worth stating plainly.
+Bristol's scheme is run by Dott, whose GBFS feed is public and needs no key. One thing
+about it shapes the whole design, so it is worth stating plainly.
 
 **Dott rotates each vehicle's `bike_id` after every rental.** The GBFS specification asks
 operators to do this precisely so that riders cannot be followed from trip to trip. Measured
@@ -65,7 +73,7 @@ Both depend on having seen a quiet period to calibrate the fleet size, so they s
 out until the collector has ~12 hours of data including one overnight lull. The dashboard
 shows how much longer it needs rather than printing a number it cannot stand behind.
 
-## Public transport
+## Buses, trains and ferries
 
 Three modes, three very different levels of availability. Measured, not assumed:
 
@@ -199,7 +207,7 @@ All optional, via environment variables or `.env`:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HUSH_CITY` | `bristol` | Any Dott city slug (`nottingham`, `milton-keynes`, …) |
+| `HUSH_CITY` | `bristol` | Scooter scheme city slug (`nottingham`, `milton-keynes`, …) |
 | `HUSH_POLL_INTERVAL` | `60` | Seconds between polls. The feed itself refreshes every ~2 min |
 | `HUSH_DB` | `data/hush.db` | SQLite path |
 | `HUSH_RETAIN_DAYS` | `7` | How long to keep retired vehicle IDs |
@@ -248,10 +256,10 @@ python3 -m hush.server --no-collector # serve only
 ## Layout
 
 ```
-hush/          collector, analytics and server (stdlib only)
+hush/          collectors, analytics and server (stdlib only)
   config.py    tunables and feed URLs
   db.py        SQLite schema
-  collector.py scooter polling and event inference
+  collector.py scooters and bikes: polling and event inference
   gtfsrt.py    minimal GTFS-Realtime protobuf decoder
   transit.py   buses from BODS, infrastructure from OpenStreetMap
   rail.py      Realtime Trains: token refresh and live station boards

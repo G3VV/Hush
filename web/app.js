@@ -1,6 +1,7 @@
-/* Hush — Dott fleet map & analytics for Bristol.
-   Everything under /api is served by hush/server.py. Trip history is inferred
-   locally from repeated polls of the GBFS feed, so it starts empty and fills in. */
+/* Hush — a live map of how Bristol moves: shared scooters and bikes, buses,
+   coaches and trains, on one map.
+   Everything under /api is served by hush/server.py. History is accumulated
+   locally from repeated polls, so it starts empty and fills in. */
 
 'use strict';
 
@@ -129,7 +130,8 @@ const TILES = {
   light: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
 };
 const ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ' +
-             '&copy; <a href="https://carto.com/attributions">CARTO</a> · vehicle data: Dott GBFS';
+             '&copy; <a href="https://carto.com/attributions">CARTO</a> · ' +
+             'scooters: Dott · buses: DfT BODS · trains: Realtime Trains';
 
 function initMap(center, zoom) {
   /* One shared canvas for every vector layer. If layers are left to create
