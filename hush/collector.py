@@ -1,4 +1,7 @@
-"""Polls the Dott GBFS feed and reconstructs vehicle history from snapshots.
+"""Shared scooters and bikes: polls the Dott GBFS feed and reconstructs history.
+
+This module covers the micromobility side only. Buses live in transit.py and
+trains in rail.py.
 
 The GBFS `free_bike_status` feed lists only vehicles that are parked and
 rentable right now. There is no trip history in the API. What we can observe:

@@ -1,4 +1,4 @@
-"""Configuration for the Hush collector and server.
+"""Configuration for Hush: collectors, feeds and server.
 
 Every setting is an environment variable. They can also be written to a `.env`
 file in the project root, which is read once at import, before anything below
@@ -65,7 +65,7 @@ POLL_INTERVAL_S = int(os.environ.get("HUSH_POLL_INTERVAL", "60"))
 STATIC_REFRESH_S = int(os.environ.get("HUSH_STATIC_REFRESH", "21600"))  # 6h
 
 HTTP_TIMEOUT_S = 45
-USER_AGENT = "Hush/1.0 (Dott GBFS analytics; +https://github.com/g3vv/hush)"
+USER_AGENT = "Hush/1.0 (Bristol transport map; +https://github.com/g3vv/hush)"
 
 # --- Trip inference thresholds -------------------------------------------------
 # GPS scatter on a stationary scooter is typically <20m. Anything under this is

@@ -220,11 +220,11 @@ def start_collector_thread():
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Hush - Dott fleet map & analytics")
+    ap = argparse.ArgumentParser(description="Hush - live transport map and analytics for Bristol")
     ap.add_argument("--host", default=config.SERVER_HOST)
     ap.add_argument("--port", type=int, default=config.SERVER_PORT)
     ap.add_argument("--no-collector", action="store_true",
-                    help="serve only; do not poll the Dott feed")
+                    help="serve only; do not poll any feed")
     args = ap.parse_args()
 
     db.init()
