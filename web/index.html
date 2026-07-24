@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hush — Dott fleet, Bristol</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <div>
+      <h1>Hush</h1>
+      <p class="brand-sub">Dott fleet · Bristol</p>
+    </div>
+  </div>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" role="tab" data-tab="map" aria-selected="true">Map</button>
+    <button class="tab" role="tab" data-tab="analytics" aria-selected="false">Analytics</button>
+    <button class="tab" role="tab" data-tab="fleet" aria-selected="false">Fleet</button>
+  </nav>
+
+  <div class="topbar-right">
+    <div class="live" id="liveStatus" title="Collector status">
+      <span class="dot" id="liveDot"></span>
+      <span id="liveText">connecting…</span>
+    </div>
+    <button class="icon-btn" id="themeToggle" title="Toggle light / dark" aria-label="Toggle theme">◐</button>
+  </div>
+</header>
+
+<!-- ───────────────────────────── MAP ───────────────────────────── -->
+<main class="panel is-active" id="tab-map">
+  <div class="map-wrap">
+    <div id="map"></div>
+
+    <div class="map-controls" id="mapControls">
+      <div class="ctl-group">
+        <label class="ctl-label">Colour by</label>
+        <div class="seg" id="colorBy">
+          <button data-v="battery" class="is-active">Battery</button>
+          <button data-v="type">Type</button>
+          <button data-v="idle">Idle</button>
+        </div>
+      </div>
+
+      <div class="ctl-group">
+        <label class="ctl-label">Vehicle</label>
+        <div class="seg" id="typeFilter">
+          <button data-v="" class="is-active">All</button>
+          <button data-v="dott_scooter">Scooters</button>
+          <button data-v="dott_bicycle">Bikes</button>
+        </div>
+      </div>
+
+      <div class="ctl-group">
+        <label class="ctl-label">Battery ≥ <span id="fuelVal" class="ctl-num">0%</span></label>
+        <input type="range" id="fuelRange" min="0" max="100" value="0" step="5">
+      </div>
+
+      <div class="ctl-group">
+        <label class="ctl-label">Layers</label>
+        <label class="chk"><input type="checkbox" id="layerZones"> Geofencing zones</label>
+        <label class="chk"><input type="checkbox" id="layerStations"> Parking bays</label>
+        <label class="chk"><input type="checkbox" id="layerPickups"> Rental hotspots</label>
+        <label class="chk"><input type="checkbox" id="layerDropoffs"> Drop-off hotspots</label>
+        <label class="chk"><input type="checkbox" id="layerBalance"> Net gain / drain</label>
+      </div>
+
+      <div class="legend" id="legend"></div>
+      <p class="ctl-foot" id="countLabel">—</p>
+    </div>
+
+    <!-- vehicle detail -->
+    <aside class="detail" id="detail" aria-live="polite">
+      <button class="detail-close" id="detailClose" aria-label="Close">×</button>
+      <div id="detailBody"></div>
+    </aside>
+  </div>
+</main>
+
+<!-- ─────────────────────────── ANALYTICS ─────────────────────────── -->
+<main class="panel" id="tab-analytics">
+  <div class="scroll">
+    <div class="section-head">
+      <div>
+        <h2>Fleet analytics</h2>
+        <p class="muted" id="windowNote">—</p>
+      </div>
+      <div class="seg" id="windowSel">
+        <button data-v="6">6h</button>
+        <button data-v="24" class="is-active">24h</button>
+        <button data-v="72">3d</button>
+        <button data-v="168">7d</button>
+      </div>
+    </div>
+
+    <div class="tiles" id="tiles"></div>
+
+    <div class="note" id="methodNote">
+      <strong>How this is measured.</strong> Dott rotates each vehicle's ID after every
+      rental — the GBFS spec asks operators to, so riders can't be followed between
+      trips. A vehicle that leaves the feed never comes back under the same ID, so
+      individual journeys can't be reconstructed and aren't shown here. What is
+      directly observable: a rental <em>starting</em> (a vehicle leaves the feed) and a
+      rental <em>ending</em> (a new ID appears). Ride duration is derived from those
+      counts by Little's Law rather than measured per vehicle, and the number out
+      riding is the shortfall against the largest fleet ever seen available — so both
+      need about half a day of collecting, including one overnight lull, before they
+      mean anything.
+    </div>
+
+    <div class="grid">
+      <figure class="card">
+        <figcaption>
+          <h3>Fleet on the street</h3>
+          <p class="muted">Vehicles listed as rentable at each poll, split by kind.</p>
+        </figcaption>
+        <div class="chart" id="chartAvail"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Rides in progress</h3>
+          <p class="muted">Estimated as the shortfall against the largest fleet ever seen available. Needs an overnight lull to calibrate.</p>
+        </figcaption>
+        <div class="chart" id="chartRiding"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Rentals per hour</h3>
+          <p class="muted">Starts and ends counted separately. They track each other closely once a full hour is in view.</p>
+        </figcaption>
+        <div class="chart" id="chartHourly"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Battery distribution</h3>
+          <p class="muted">Charge across all available vehicles right now.</p>
+        </figcaption>
+        <div class="chart" id="chartBattery"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Time since last moved</h3>
+          <p class="muted">How long each available vehicle has sat untouched — the tail is dead stock.</p>
+        </figcaption>
+        <div class="chart" id="chartIdle"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Wait before rental</h3>
+          <p class="muted">How long a vehicle sat parked before someone took it. Only vehicles seen both arriving and leaving count, so short waits are over-represented until the collector has run far longer than a typical wait.</p>
+        </figcaption>
+        <div class="chart" id="chartDwell"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Operational moves</h3>
+          <p class="muted">Moves that kept the same ID, so no rental happened — vans rebalancing, battery swaps.</p>
+        </figcaption>
+        <div class="chart" id="chartKinds"></div>
+      </figure>
+    </div>
+  </div>
+</main>
+
+<!-- ───────────────────────────── FLEET ───────────────────────────── -->
+<main class="panel" id="tab-fleet">
+  <div class="scroll">
+    <div class="section-head">
+      <div>
+        <h2>Fleet table</h2>
+        <p class="muted">The same data as the map, in text. Click any row to open that vehicle.</p>
+      </div>
+      <div class="seg" id="fleetSel">
+        <button data-v="stranded" class="is-active">Longest idle</button>
+        <button data-v="flat">Flattest battery</button>
+        <button data-v="quickest">Fastest rented</button>
+      </div>
+    </div>
+    <div class="card table-card"><div id="fleetTable"></div></div>
+  </div>
+</main>
+
+<div class="toast" id="toast" role="status"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  /* Offline / blocked-CDN fallback. Run scripts/vendor-leaflet.sh to populate
+     web/vendor, and this picks it up without any further change. */
+  if (!window.L) {
+    document.write('<link rel="stylesheet" href="vendor/leaflet.css">');
+    document.write('<script src="vendor/leaflet.js"><\/script>');
+  }
+</script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,2 +1,125 @@
-# **Hush** Game Engine
-Coming soon
+# Hush
+
+Live map and analytics for the Dott e-scooter and e-bike fleet in **Bristol**, built on
+Dott's public GBFS feed.
+
+- **Map** — every rentable vehicle in the city, coloured by battery, type or idle time,
+  clickable for detail, with geofencing zones, parking bays and rental hotspots as overlays.
+- **Analytics** — fleet size, rentals per hour, battery distribution, dead stock, wait times.
+- **Fleet** — the same data as sortable tables: longest idle, flattest battery, fastest rented.
+
+No dependencies beyond the Python standard library. Leaflet loads from a CDN; run
+`sh scripts/vendor-leaflet.sh` to keep a local copy instead, which the page picks up
+automatically.
+
+```bash
+python3 -m hush.server          # collector + dashboard on http://127.0.0.1:8000
+```
+
+Then open <http://127.0.0.1:8000>. Data lands in `data/hush.db` (SQLite).
+
+## What the API can and cannot tell you
+
+This matters more than anything else in the project, so it is worth stating plainly.
+
+**Dott rotates each vehicle's `bike_id` after every rental.** The GBFS specification asks
+operators to do this precisely so that riders cannot be followed from trip to trip. Measured
+against the live Bristol feed: over 20 minutes, 134 vehicles left the feed and 129 fresh
+UUIDs appeared — and **not one** of the departed IDs ever came back.
+
+The consequence is that **per-vehicle journey history does not exist and cannot be
+reconstructed**, by this or any other tool reading the public feed. A vehicle that leaves the
+feed is gone for good under that identity. There is no way to know which rental start goes
+with which rental end, so no origin-destination pairs, no per-vehicle trip lists, and no
+route history. Any tool claiming to show you those from this feed is guessing.
+
+What *is* directly observable, and what Hush is built on:
+
+| Observable | How |
+|---|---|
+| Every rentable vehicle's position, battery, range | Straight from the feed |
+| A rental **starting** | A vehicle disappears from the feed |
+| A rental **ending** | A brand-new ID appears |
+| How long a vehicle sat before being taken | Time between its arrival and disappearance |
+| Battery drain while parked | Change in charge across polls |
+| Operational moves (vans, battery swaps) | Position changes that *keep* the same ID, so no rental happened |
+
+Two headline numbers are **estimates**, derived rather than measured, and the UI labels them
+as such:
+
+- **Rides in progress** — missing IDs pile up forever (they retire on rental), so they cannot
+  be counted directly. Instead the largest available-count ever seen is taken as the deployed
+  fleet size, and rides in progress is the shortfall against it.
+- **Mean ride length** — from Little's Law: with `L` vehicles out at any moment and rentals
+  starting at rate `λ`, the average ride lasts `L / λ`. This needs only counts, never a link
+  between a particular start and end, which is exactly what the ID rotation denies us.
+
+Both depend on having seen a quiet period to calibrate the fleet size, so they stay blanked
+out until the collector has ~12 hours of data including one overnight lull. The dashboard
+shows how much longer it needs rather than printing a number it cannot stand behind.
+
+## How history is built
+
+The feed is a snapshot with no history endpoint, so history is accumulated by polling. Each
+poll is diffed against the last:
+
+- a vehicle **present** and stationary → its current stay is extended
+- a vehicle that **vanishes** → a rental started (or ops collected it): a `pickup` event
+- a **new ID** appears → a rental ended (or a fresh deployment): a `dropoff` event
+- a vehicle that **moved while keeping its ID** → an operational move, classified as a van
+  relocation (faster than the vehicle can travel), a battery swap (charge went *up*), or GPS
+  drift (under 30 m — measured jitter on parked vehicles peaks around 9 m)
+
+Retired IDs are pruned after 7 days (`HUSH_RETAIN_DAYS`). Rental events, poll logs and fleet
+samples are never pruned — they are the historical record.
+
+## Configuration
+
+All optional, via environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HUSH_CITY` | `bristol` | Any Dott city slug (`nottingham`, `milton-keynes`, …) |
+| `HUSH_POLL_INTERVAL` | `60` | Seconds between polls. The feed itself refreshes every ~2 min |
+| `HUSH_DB` | `data/hush.db` | SQLite path |
+| `HUSH_RETAIN_DAYS` | `7` | How long to keep retired vehicle IDs |
+| `HUSH_HOST` / `HUSH_PORT` | `127.0.0.1:8000` | Bind address |
+
+Run the collector headless (no dashboard), or the dashboard against an existing database:
+
+```bash
+python3 -m hush.collector             # collect only
+python3 -m hush.server --no-collector # serve only
+```
+
+## API
+
+| Endpoint | Returns |
+|---|---|
+| `/api/health` | Collector status, poll count, rentals tracked |
+| `/api/live` | Current vehicles; filter by `type`, `min_fuel`, `max_fuel`, `status` |
+| `/api/vehicle/<id>` | One vehicle: state, stays, operational moves |
+| `/api/stats?hours=24` | Everything on the analytics tab |
+| `/api/hotspots?hours=24` | Rental and drop-off hotspots, grid-clustered |
+| `/api/balance?hours=24` | Net gain/drain per area — where rebalancing is needed |
+| `/api/events?hours=24` | Raw rental start/end events |
+| `/api/leaderboard?hours=24` | Longest idle, flattest battery, fastest rented |
+| `/api/zones`, `/api/stations`, `/api/pricing` | Cached static feeds |
+
+## Layout
+
+```
+hush/          collector, analytics and server (stdlib only)
+  config.py    tunables and feed URLs
+  db.py        SQLite schema
+  collector.py polling and event inference
+  analytics.py aggregations
+  server.py    HTTP API + static files
+web/           dashboard (vanilla JS, vendored Leaflet)
+data/hush.db   created on first run
+```
+
+Pricing used for revenue estimates is Bristol's at time of writing: £1 unlock + £0.25/min,
+read from the live `system_pricing_plans` feed.
+
+Vehicle data © Dott, via their public GBFS feed. Basemap © OpenStreetMap contributors, © CARTO.
