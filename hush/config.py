@@ -121,6 +121,21 @@ RAIL_ENABLED = os.environ.get("HUSH_RAIL", "1") != "0"
 RAIL_POLL_INTERVAL_S = int(os.environ.get("HUSH_RAIL_INTERVAL", "300"))
 RAIL_RETAIN_S = int(os.environ.get("HUSH_RAIL_RETAIN", str(3 * 86400)))
 
+# Estimated train positions. Each active service costs one extra API request,
+# so this is throttled against the reported hourly allowance rather than a
+# fixed number: never spend below RAIL_RESERVE requests of headroom.
+TRAIN_POSITIONS = os.environ.get("HUSH_TRAIN_POSITIONS", "1") != "0"
+RAIL_RESERVE = int(os.environ.get("HUSH_RAIL_RESERVE", "150"))
+TRAIN_MAX_SERVICES = int(os.environ.get("HUSH_TRAIN_MAX", "25"))
+# Stations are matched over a wide area so calling points beyond Bristol
+# (Cardiff, Taunton, Swindon) still resolve to coordinates.
+RAIL_STATION_BBOX = (50.8, -5.4, 52.4, -1.2)
+# Track geometry is only needed where trains are drawn.
+RAIL_TRACK_BBOX = (51.20, -3.30, 52.05, -2.00)
+# A snap further than this means the nearest track is not this train's line,
+# so the interpolated point is kept instead.
+TRACK_SNAP_MAX_M = float(os.environ.get("HUSH_TRACK_SNAP_MAX", "600"))
+
 # Static infrastructure (stations, stops, ferry piers) from OpenStreetMap.
 # Overpass rate-limits aggressively, so this is cached hard.
 OVERPASS_URL = os.environ.get("HUSH_OVERPASS", "https://overpass-api.de/api/interpreter")

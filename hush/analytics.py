@@ -511,6 +511,33 @@ def rail_overview(hours=24):
     }
 
 
+def trains_live(max_age_s=1800):
+    """Estimated train positions. Derived from timings — see hush/rail.py."""
+    now = int(time.time())
+    out = []
+    for r in db.rows(
+        "SELECT * FROM train_positions WHERE computed_ts > ? ORDER BY headcode",
+        (now - max_age_s,)
+    ):
+        out.append({
+            "uid": r["uid"],
+            "code": r["headcode"],
+            "op": r["operator"],
+            "from": r["from_name"], "to": r["to_name"],
+            "origin": r["origin"], "destination": r["destination"],
+            "lat": round(r["lat"], 6), "lon": round(r["lon"], 6),
+            "brg": round(r["bearing"]) if r["bearing"] is not None else None,
+            "progress": round(r["progress"] or 0, 3),
+            "delay": r["delay_min"],
+            "state": r["state"],
+            "basis": r["basis"],
+            "on_track": r["snapped_m"] is not None,
+            "age": now - r["computed_ts"],
+            "leg_start": r["leg_start_ts"], "leg_end": r["leg_end_ts"],
+        })
+    return out
+
+
 def osm_features(kinds=None):
     sql = "SELECT osm_id, kind, name, lat, lon FROM osm_features"
     args = ()

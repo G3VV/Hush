@@ -133,6 +133,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "unknown vehicle"}, 404)
             return self._json(detail)
 
+        if path == "/api/trains":
+            return self._json({"ts": int(time.time()),
+                               "trains": analytics.trains_live()})
+
         if path == "/api/rail":
             return self._json({"stations": analytics.rail_stations()})
 

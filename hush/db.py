@@ -203,6 +203,42 @@ CREATE TABLE IF NOT EXISTS rail_services (
 CREATE INDEX IF NOT EXISTS rail_svc_station ON rail_services(station_code, scheduled_ts);
 CREATE INDEX IF NOT EXISTS rail_svc_seen ON rail_services(seen_ts DESC);
 
+-- Railway line geometry from OpenStreetMap, as individual segments. Estimated
+-- train positions are snapped onto these so they sit on track rather than
+-- cutting across country between stations.
+CREATE TABLE IF NOT EXISTS rail_track (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    lat1 REAL, lon1 REAL, lat2 REAL, lon2 REAL,
+    min_lat REAL, min_lon REAL, max_lat REAL, max_lon REAL,
+    fetched_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS rail_track_bbox ON rail_track(min_lat, max_lat);
+
+-- Estimated train positions. Derived from timings, never reported: see rail.py.
+CREATE TABLE IF NOT EXISTS train_positions (
+    uid          TEXT PRIMARY KEY,
+    headcode     TEXT,
+    operator     TEXT,
+    origin       TEXT,
+    destination  TEXT,
+    lat          REAL,
+    lon          REAL,
+    bearing      REAL,
+    from_code    TEXT,
+    to_code      TEXT,
+    from_name    TEXT,
+    to_name      TEXT,
+    progress     REAL,     -- 0..1 between the two calling points
+    delay_min    INTEGER,
+    state        TEXT,     -- at_station | between
+    basis        TEXT,     -- actual | forecast: what the leg start relied on
+    snapped_m    REAL,     -- distance moved when snapping to track
+    leg_start_ts INTEGER,
+    leg_end_ts   INTEGER,
+    computed_ts  INTEGER
+);
+CREATE INDEX IF NOT EXISTS train_pos_ts ON train_positions(computed_ts DESC);
+
 CREATE TABLE IF NOT EXISTS rail_samples (
     ts             INTEGER PRIMARY KEY,
     stations       INTEGER,
