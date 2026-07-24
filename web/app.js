@@ -9,6 +9,7 @@ const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
 const state = {
   vehicles: [],
+  buses: [],
   filters: { type: '', minFuel: 0 },
   colorBy: 'battery',
   selected: null,
@@ -110,7 +111,12 @@ function renderLegend() {
     `<div class="ctl-label">${enc.title}</div>` +
     enc.labels.map((l, i) =>
       `<div class="legend-row"><span class="legend-swatch" style="background:${cols[i]}"></span>${l}</div>`
-    ).join('');
+    ).join('') +
+    /* Shape legend: mode is encoded by shape, so it needs saying once. */
+    `<div class="ctl-label" style="margin-top:11px">Shape</div>
+     <div class="legend-row"><span class="legend-swatch" style="background:${css('--text-muted')}"></span>Round — scooter or bike</div>
+     <div class="legend-row"><span class="legend-shape-arrow"></span>Arrow — bus, pointing its way</div>
+     <div class="legend-row"><span class="legend-shape-square"></span>Square — station or stop</div>`;
 }
 
 /* ── map ────────────────────────────────────────────────────────────── */
@@ -137,6 +143,10 @@ function initMap(center, zoom) {
   state.layers.pickups   = L.layerGroup();
   state.layers.dropoffs  = L.layerGroup();
   state.layers.balance   = L.layerGroup();
+  state.layers.buses     = L.layerGroup().addTo(state.map);
+  state.layers.rail      = L.layerGroup().addTo(state.map);
+  state.layers.stops     = L.layerGroup();
+  state.layers.ferry     = L.layerGroup();
 
   state.map.on('click', e => {
     if (!e.originalEvent.target.closest('.leaflet-interactive')) closeDetail();
@@ -383,6 +393,165 @@ function drawTrail(v) {
   if (trips.length) {
     const pts = trips.flatMap(t => [[t.start_lat, t.start_lon], [t.end_lat, t.end_lon]]);
     setTimeout(() => state.map.fitBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: 16 }), 700);
+  }
+}
+
+/* ── public transport ───────────────────────────────────────────────────
+   Mode is carried by SHAPE, not colour: buses are arrows, scooters are
+   circles, infrastructure is a square in neutral ink. That keeps the colour
+   channel free to mean battery level and nothing else, and it keeps the
+   aqua/red pair separable for colour-blind readers. */
+
+async function loadBuses() {
+  let data;
+  try {
+    data = await api('/api/transit');
+  } catch (e) {
+    toast('Bus feed unavailable: ' + e.message);
+    return;
+  }
+  state.buses = data.vehicles;
+  drawBuses();
+  $('#busCount').textContent = data.vehicles.length ? `(${fmtNum(data.vehicles.length)})` : '';
+}
+
+function drawBuses() {
+  const g = state.layers.buses;
+  g.clearLayers();
+  const col = css('--series-3');
+
+  for (const b of state.buses) {
+    const known = b.brg != null;
+    // A bus with a known heading gets a pointed arrow; without one it gets a
+    // neutral dot, so the shape never implies a direction we do not have.
+    const html = known
+      ? `<div class="bus-arrow" style="transform:rotate(${b.brg}deg);border-bottom-color:${col}"></div>`
+      : `<div class="bus-dot" style="background:${col}"></div>`;
+    const m = L.marker([b.lat, b.lon], {
+      icon: L.divIcon({ className: 'bus-icon', html, iconSize: [14, 14], iconAnchor: [7, 7] }),
+      keyboard: false,
+    });
+    m.bindTooltip(
+      `<b>Bus${b.route ? ' · route ' + b.route : ''}</b><br>${b.op || 'unknown operator'}` +
+      `<br>${b.kmh != null ? b.kmh + ' km/h' : 'speed unknown'} · reported ${fmtDur(b.age)} ago`,
+      { direction: 'top', offset: [0, -6] });
+    m.on('click', () => selectBus(b.id));
+    g.addLayer(m);
+  }
+}
+
+async function selectBus(id) {
+  state.selected = null;
+  const box = $('#detail');
+  box.classList.add('is-open');
+  $('#detailBody').innerHTML = '<div class="detail-inner"><p class="muted">Loading…</p></div>';
+  let v;
+  try {
+    v = await api('/api/transit/vehicle/' + encodeURIComponent(id));
+  } catch (e) {
+    $('#detailBody').innerHTML = `<div class="detail-inner"><p class="muted">Could not load: ${e.message}</p></div>`;
+    return;
+  }
+  renderBusDetail(v);
+  drawBusTrack(v);
+}
+
+function renderBusDetail(v) {
+  const track = v.track || [];
+  const rows = track.slice().reverse().slice(0, 40).map(p =>
+    `<div class="tl-item is-trip" data-lat="${p.lat}" data-lon="${p.lon}">
+       <div class="tl-title">${p.speed_kmh != null ? p.speed_kmh.toFixed(1) + ' km/h' : 'Position fix'}</div>
+       <div class="tl-meta">${fmtTime(p.ts)}${p.bearing != null ? ' · heading ' + Math.round(p.bearing) + '°' : ''}</div>
+     </div>`).join('');
+
+  $('#detailBody').innerHTML = `
+    <div class="detail-inner">
+      <div class="veh-head">
+        <div class="veh-type">Bus${v.route_id ? ' · route ' + v.route_id : ''}</div>
+        <p class="veh-id">${v.id}</p>
+        <div class="badges">
+          <span class="badge"><span class="legend-swatch" style="background:${css('--series-3')}"></span>${v.operator || 'Unknown operator'}</span>
+          ${v.age_s > 300 ? '<span class="badge">Position going stale</span>' : ''}
+        </div>
+      </div>
+
+      <div class="kv">
+        <div class="kv-item"><div class="kv-k">Speed now</div>
+          <div class="kv-v">${v.speed_kmh != null ? v.speed_kmh.toFixed(1) + '<small>km/h</small>' : '—'}</div></div>
+        <div class="kv-item"><div class="kv-k">Average</div>
+          <div class="kv-v">${v.avg_speed_kmh != null ? v.avg_speed_kmh + '<small>km/h</small>' : '—'}</div></div>
+        <div class="kv-item"><div class="kv-k">Tracked for</div>
+          <div class="kv-v" style="font-size:14px">${fmtDur(v.tracked_s)}</div></div>
+        <div class="kv-item"><div class="kv-k">Distance</div>
+          <div class="kv-v" style="font-size:14px">${fmtDist(v.distance_m)}</div></div>
+        <div class="kv-item"><div class="kv-k">Position age</div>
+          <div class="kv-v" style="font-size:14px">${fmtDur(v.age_s)}</div></div>
+        <div class="kv-item"><div class="kv-k">Fixes</div>
+          <div class="kv-v">${fmtNum(v.fixes)}</div></div>
+      </div>
+
+      <div class="sub-head"><span>Recorded track</span><span>${track.length} fixes</span></div>
+      ${track.length > 1
+        ? `<div class="timeline">${rows}</div>`
+        : `<div class="empty">Only one fix so far. Bus fleet numbers are stable, so a
+             real trail builds up from here — check back in a few minutes.</div>`}
+
+      <p class="muted" style="margin-top:12px">
+        Route shown is the operator's internal GTFS route ID, not the number on the
+        front of the bus — public route names need a (free) BODS API key. Speed is
+        derived between polls; the feed carries no speed field.
+      </p>
+    </div>`;
+
+  $$('.tl-item', $('#detailBody')).forEach(el => {
+    el.addEventListener('click', () => {
+      const lat = parseFloat(el.dataset.lat), lon = parseFloat(el.dataset.lon);
+      if (!Number.isNaN(lat)) state.map.flyTo([lat, lon], 17, { duration: 0.6 });
+    });
+  });
+}
+
+function drawBusTrack(v) {
+  const g = state.layers.trail;
+  g.clearLayers();
+  const pts = (v.track || []).filter(p => p.lat != null).map(p => [p.lat, p.lon]);
+  if (pts.length > 1) {
+    L.polyline(pts, { color: css('--series-3'), weight: 3, opacity: 0.9 }).addTo(g);
+    L.circleMarker(pts[0], {
+      radius: 5, color: css('--surface-1'), weight: 2,
+      fillColor: css('--series-3'), fillOpacity: 1,
+    }).bindTooltip('Track starts here', { direction: 'top' }).addTo(g);
+    state.map.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 16 });
+  } else if (v.lat != null) {
+    state.map.flyTo([v.lat, v.lon], 16, { duration: 0.6 });
+  }
+  if (v.lat != null) {
+    L.circleMarker([v.lat, v.lon], {
+      radius: 8, color: css('--text-primary'), weight: 2.5,
+      fillColor: css('--series-3'), fillOpacity: 1,
+    }).addTo(g);
+  }
+}
+
+/* Infrastructure: squares in neutral ink, so it never competes with vehicles. */
+async function loadInfrastructure(kinds, layer, label) {
+  const q = kinds.map(k => 'kind=' + encodeURIComponent(k)).join('&');
+  const { features } = await api('/api/infrastructure?' + q);
+  if (!features.length) {
+    toast(`No ${label} cached yet — OpenStreetMap lookup may still be pending`);
+    return;
+  }
+  const big = kinds[0] === 'rail_station';
+  for (const f of features) {
+    L.marker([f.lat, f.lon], {
+      icon: L.divIcon({
+        className: 'infra-icon',
+        html: `<div class="infra-mark ${big ? 'is-rail' : 'is-small'}"></div>`,
+        iconSize: big ? [11, 11] : [7, 7],
+        iconAnchor: big ? [5.5, 5.5] : [3.5, 3.5],
+      }),
+      keyboard: false,
+    }).bindTooltip(f.name || label, { direction: 'top', offset: [0, -5] }).addTo(layer);
   }
 }
 
@@ -736,6 +905,19 @@ function renderStats(s) {
       .map((l, i) => ({ label: l, short: l, value: c.idle_hist[i] })),
     { unit: 'vehicles' });
 
+  barChart($('#chartHourOfDay'),
+    (c.hour_of_day || []).map((v, i) => ({
+      label: pad(i) + ':00', short: i % 3 === 0 ? pad(i) : '', value: v,
+    })),
+    { unit: 'rentals/hour', empty: 'Fills in as the collector spans more of the day.' });
+
+  barChart($('#chartCentre'),
+    ['<1km', '1–2km', '2–3km', '3–5km', '5–8km', '8–12km', '12km+']
+      .map((l, i) => ({ label: l, short: l.replace('–', '-'), value: (c.centre_hist || [])[i] })),
+    { unit: 'vehicles' });
+
+  renderTransit(s.transit || {});
+
   barChart($('#chartDwell'),
     ['<15m', '15–30m', '30–60m', '1–2h', '2–4h', '4–8h', '8–24h', '24h+']
       .map((l, i) => ({ label: l, short: l.replace('–', '-'), value: c.dwell_hist[i] })),
@@ -751,6 +933,40 @@ function renderStats(s) {
     })),
     { unit: 'moves', height: 170,
       empty: 'No operational moves seen yet. These are rarer than rentals — vans rebalancing or swapping batteries.' });
+}
+
+function renderTransit(t) {
+  $('#transitNote').textContent = t.live != null
+    ? `${fmtNum(t.live)} vehicles reporting live · ${fmtNum(t.routes)} routes · ${fmtNum(t.stations)} rail stations mapped`
+    : 'no transit data yet';
+
+  $('#transitTiles').innerHTML = [
+    ['Buses live', fmtNum(t.live || 0), 'fresh position in last 15 min'],
+    ['Actually moving', fmtNum(t.moving || 0), 'above 3 km/h'],
+    ['Routes running', fmtNum(t.routes || 0), 'distinct GTFS route IDs'],
+    ['Operators', fmtNum(t.operators || 0), 'reporting in Bristol'],
+    ['Avg bus speed', t.avg_speed_kmh != null ? t.avg_speed_kmh + ' km/h' : '—', 'moving vehicles only'],
+    ['Rail stations', fmtNum(t.stations || 0), 'positions only — no live trains'],
+  ].map(([k, v, sub]) =>
+    `<div class="tile"><div class="tile-k">${k}</div><div class="tile-v">${v}</div>
+     <div class="tile-sub">${sub}</div></div>`).join('');
+
+  const samples = t.samples || [];
+  lineChart($('#chartBuses'), [
+    { name: 'Reporting', color: css('--series-3'), points: samples.map(r => [r.ts, r.active]) },
+    { name: 'Moving', color: css('--series-2'), points: samples.filter(r => r.moving != null).map(r => [r.ts, r.moving]) },
+  ], { empty: 'Needs at least two transit polls — these run every couple of minutes.' });
+
+  barChart($('#chartOperators'),
+    (t.by_operator || []).slice(0, 6).map(o => ({
+      label: o.operator, short: o.operator.split(' ')[0], value: o.n, color: css('--series-3'),
+    })),
+    { unit: 'buses', empty: 'No operators reporting yet.' });
+
+  barChart($('#chartBusSpeed'),
+    ['0–5', '5–10', '10–15', '15–20', '20–25', '25–30', '30–40', '40+']
+      .map((l, i) => ({ label: l + ' km/h', short: l.split('–')[0], value: (t.speed_hist || [])[i] })),
+    { unit: 'fixes', empty: 'Speed needs two consecutive fixes per vehicle — building.' });
 }
 
 /* ── fleet table ────────────────────────────────────────────────────── */
@@ -849,6 +1065,21 @@ function wire() {
   fuel.addEventListener('input', () => { $('#fuelVal').textContent = fuel.value + '%'; });
   fuel.addEventListener('change', () => { state.filters.minFuel = +fuel.value; loadLive(); });
 
+  $('#layerBuses').addEventListener('change', e => {
+    if (e.target.checked) { state.layers.buses.addTo(state.map); loadBuses(); }
+    else state.map.removeLayer(state.layers.buses);
+  });
+  $('#layerScooters').addEventListener('change', e => {
+    if (e.target.checked) state.layers.vehicles.addTo(state.map);
+    else state.map.removeLayer(state.layers.vehicles);
+  });
+  $('#layerRail').addEventListener('change', e => toggleLayer('rail', e.target.checked,
+    l => loadInfrastructure(['rail_station', 'rail_halt'], l, 'rail stations')));
+  $('#layerStops').addEventListener('change', e => toggleLayer('stops', e.target.checked,
+    l => loadInfrastructure(['bus_stop', 'bus_station'], l, 'bus stops')));
+  $('#layerFerry').addEventListener('change', e => toggleLayer('ferry', e.target.checked,
+    l => loadInfrastructure(['ferry_terminal'], l, 'ferry piers')));
+
   $('#layerZones').addEventListener('change', e => toggleLayer('zones', e.target.checked, loadZones));
   $('#layerStations').addEventListener('change', e => toggleLayer('stations', e.target.checked, loadStations));
   $('#layerPickups').addEventListener('change', e => toggleLayer('pickups', e.target.checked, loadPickups));
@@ -887,12 +1118,15 @@ async function main() {
   state.map.on('zoomend', () => drawVehicles());
 
   await loadLive();
+  loadBuses();
+  toggleLayer('rail', true, l => loadInfrastructure(['rail_station', 'rail_halt'], l, 'rail stations'));
 
   if (h && h.polls <= 1) {
     toast('Collector just started — ride history builds up as it watches the feed', 5200);
   }
 
   setInterval(loadLive, 30000);
+  setInterval(() => { if ($('#layerBuses').checked) loadBuses(); }, 45000);
   setInterval(loadHealth, 15000);
   setInterval(() => {
     if ($('#tab-analytics').classList.contains('is-active')) loadStats();

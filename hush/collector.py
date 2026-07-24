@@ -361,13 +361,24 @@ class Collector:
         interval = interval or config.POLL_INTERVAL_S
         print(f"[collector] polling {config.CITY} every {interval}s", flush=True)
         last_prune = 0
+        last_transit = 0
         while True:
             cycle = time.time()
             try:
                 self.refresh_static()
                 self.poll()
+                # Public transport runs on its own, slower cadence: the BODS
+                # feed is a couple of megabytes and covers the whole country.
+                if config.TRANSIT_ENABLED and cycle - last_transit >= config.TRANSIT_POLL_INTERVAL_S:
+                    last_transit = cycle
+                    from . import transit
+                    transit.refresh_osm()
+                    transit.poll(self.conn)
                 if cycle - last_prune > 3600:
                     self.prune()
+                    if config.TRANSIT_ENABLED:
+                        from . import transit
+                        transit.prune(self.conn)
                     last_prune = cycle
             except Exception as exc:  # keep the loop alive across anything
                 print(f"[collector] unexpected error: {exc!r}", flush=True)

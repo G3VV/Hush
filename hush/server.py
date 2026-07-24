@@ -12,6 +12,7 @@ import posixpath
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import urllib.parse
 from urllib.parse import urlparse, parse_qs
 
 from . import analytics, collector, config, db
@@ -117,6 +118,24 @@ class Handler(BaseHTTPRequestHandler):
                 "pickups": analytics.hotspots(hours, "pickup"),
                 "dropoffs": analytics.hotspots(hours, "dropoff"),
             })
+
+        if path == "/api/transit":
+            return self._json({
+                "ts": int(time.time()),
+                "vehicles": analytics.transit_live(
+                    operator=qs.get("operator", [None])[0]),
+            })
+
+        if path.startswith("/api/transit/vehicle/"):
+            vid = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+            detail = analytics.transit_vehicle(vid)
+            if not detail:
+                return self._json({"error": "unknown vehicle"}, 404)
+            return self._json(detail)
+
+        if path == "/api/infrastructure":
+            kinds = qs.get("kind")
+            return self._json({"features": analytics.osm_features(kinds)})
 
         if path == "/api/balance":
             return self._json({"cells": analytics.balance(hours)})

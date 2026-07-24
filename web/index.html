@@ -63,7 +63,16 @@
       </div>
 
       <div class="ctl-group">
-        <label class="ctl-label">Layers</label>
+        <label class="ctl-label">Public transport</label>
+        <label class="chk"><input type="checkbox" id="layerBuses" checked> Live buses <span class="chk-n" id="busCount"></span></label>
+        <label class="chk"><input type="checkbox" id="layerRail" checked> Rail stations</label>
+        <label class="chk"><input type="checkbox" id="layerStops"> Bus stops</label>
+        <label class="chk"><input type="checkbox" id="layerFerry"> Ferry piers</label>
+      </div>
+
+      <div class="ctl-group">
+        <label class="ctl-label">Scooter layers</label>
+        <label class="chk"><input type="checkbox" id="layerScooters" checked> Scooters &amp; bikes</label>
         <label class="chk"><input type="checkbox" id="layerZones"> Geofencing zones</label>
         <label class="chk"><input type="checkbox" id="layerStations"> Parking bays</label>
         <label class="chk"><input type="checkbox" id="layerPickups"> Rental hotspots</label>
@@ -169,6 +178,68 @@
           <p class="muted">Moves that kept the same ID, so no rental happened — vans rebalancing, battery swaps.</p>
         </figcaption>
         <div class="chart" id="chartKinds"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Demand by hour of day</h3>
+          <p class="muted">Rentals started per hour, averaged across the days collected so far.</p>
+        </figcaption>
+        <div class="chart" id="chartHourOfDay"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Distance from the centre</h3>
+          <p class="muted">How far the available fleet sits from the city centre.</p>
+        </figcaption>
+        <div class="chart" id="chartCentre"></div>
+      </figure>
+    </div>
+
+    <div class="section-head" style="margin-top:26px">
+      <div>
+        <h2>Public transport</h2>
+        <p class="muted" id="transitNote">—</p>
+      </div>
+    </div>
+
+    <div class="tiles" id="transitTiles"></div>
+
+    <div class="note">
+      <strong>Where this comes from.</strong> Live bus and coach positions are the DfT's
+      Bus Open Data Service national GTFS-Realtime feed, clipped to Bristol — no API key
+      needed. Operators leave dead vehicles in the feed for hours, so anything whose last
+      report is over 15 minutes old is dropped rather than drawn as a phantom bus. Bus
+      fleet numbers are stable, unlike the scooters, so these vehicles are tracked properly
+      and each one has a real recorded trail. <em>Live train positions are not included</em> —
+      every UK source for them (Network Rail, Darwin, Realtime Trains) requires a
+      registered account, so rail appears as stations only.
+    </div>
+
+    <div class="grid">
+      <figure class="card">
+        <figcaption>
+          <h3>Buses on the road</h3>
+          <p class="muted">Vehicles reporting a fresh position, and how many of those are actually moving.</p>
+        </figcaption>
+        <div class="chart" id="chartBuses"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Buses by operator</h3>
+          <p class="muted">Who is running the live fleet right now.</p>
+        </figcaption>
+        <div class="chart" id="chartOperators"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Bus speed</h3>
+          <p class="muted">Derived between polls — the feed carries no speed field. Excludes stationary vehicles.</p>
+        </figcaption>
+        <div class="chart" id="chartBusSpeed"></div>
       </figure>
     </div>
   </div>
