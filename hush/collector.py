@@ -380,6 +380,8 @@ class Collector:
                     last_rail = cycle
                     from . import rail
                     rail.poll()
+                    if config.TRAIN_POSITIONS:
+                        rail.position_trains()
                 if cycle - last_prune > 3600:
                     self.prune()
                     if config.TRANSIT_ENABLED:

@@ -10,6 +10,7 @@ const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const state = {
   vehicles: [],
   buses: [],
+  trains: [],
   filters: { type: '', minFuel: 0 },
   colorBy: 'battery',
   selected: null,
@@ -116,7 +117,8 @@ function renderLegend() {
     `<div class="ctl-label" style="margin-top:11px">Shape</div>
      <div class="legend-row"><span class="legend-swatch" style="background:${css('--text-muted')}"></span>Round — scooter or bike</div>
      <div class="legend-row"><span class="legend-shape-arrow"></span>Arrow — bus, pointing its way</div>
-     <div class="legend-row"><span class="legend-shape-square"></span>Square — station or stop</div>`;
+     <div class="legend-row"><span class="legend-shape-square"></span>Square — station or stop</div>
+     <div class="legend-row"><span class="legend-shape-train"></span>Bar — train (estimated position)</div>`;
 }
 
 /* ── map ────────────────────────────────────────────────────────────── */
@@ -144,6 +146,7 @@ function initMap(center, zoom) {
   state.layers.dropoffs  = L.layerGroup();
   state.layers.balance   = L.layerGroup();
   state.layers.buses     = L.layerGroup().addTo(state.map);
+  state.layers.trains    = L.layerGroup().addTo(state.map);
   state.layers.rail      = L.layerGroup().addTo(state.map);
   state.layers.stops     = L.layerGroup();
   state.layers.ferry     = L.layerGroup();
@@ -560,6 +563,101 @@ async function loadRail(layer) {
       .on('click', () => selectStation(s.code))
       .addTo(layer);
   }
+}
+
+/* Trains are ESTIMATED positions, not GPS. They get their own shape — a
+   rounded bar, like a carriage — and a dashed halo when the estimate is
+   weaker, so they are never mistaken for the measured bus positions. */
+async function loadTrains() {
+  let data;
+  try {
+    data = await api('/api/trains');
+  } catch (e) {
+    return;
+  }
+  state.trains = data.trains;
+  drawTrains();
+  $('#trainCount').textContent = data.trains.length ? `(${fmtNum(data.trains.length)})` : '';
+}
+
+function drawTrains() {
+  const g = state.layers.trains;
+  g.clearLayers();
+  for (const t of state.trains) {
+    const late = t.delay != null && t.delay > 5;
+    const col = late ? css('--bat-low') : css('--series-1');
+    const cls = 'train-mark' + (t.state === 'at_station' ? ' is-stopped' : '') +
+                (t.on_track ? '' : ' is-offtrack');
+    const m = L.marker([t.lat, t.lon], {
+      icon: L.divIcon({
+        className: 'train-icon',
+        html: `<div class="${cls}" style="background:${col};${t.brg != null ? `transform:rotate(${t.brg}deg)` : ''}"></div>`,
+        iconSize: [16, 16], iconAnchor: [8, 8],
+      }),
+      zIndexOffset: 500,
+      keyboard: false,
+    });
+    m.bindTooltip(
+      `<b>${t.code || 'train'}</b> ${t.op || ''}<br>` +
+      `${t.from || '?'} → ${t.to || '?'}<br>` +
+      (t.state === 'at_station'
+        ? 'At the station'
+        : `${Math.round(t.progress * 100)}% along this leg`) +
+      (t.delay != null ? `<br>${t.delay > 0 ? '+' + t.delay + ' min' : 'on time'}` : '') +
+      `<span class="t-sub">estimated from timings, not GPS</span>`,
+      { direction: 'top', offset: [0, -8] });
+    m.on('click', () => selectTrain(t));
+    g.addLayer(m);
+  }
+}
+
+function selectTrain(t) {
+  $('#detail').classList.add('is-open');
+  const pct = Math.round((t.progress || 0) * 100);
+  $('#detailBody').innerHTML = `
+    <div class="detail-inner">
+      <div class="veh-head">
+        <div class="veh-type">Train · ${t.code || '—'}</div>
+        <p class="veh-id" style="font-family:var(--sans);font-size:15px">${t.origin || '?'} → ${t.destination || '?'}</p>
+        <div class="badges">
+          <span class="badge">${t.op || 'Unknown operator'}</span>
+          <span class="badge">${t.state === 'at_station' ? 'At station' : 'Between stations'}</span>
+          ${t.basis === 'actual'
+            ? '<span class="badge">From observed times</span>'
+            : '<span class="badge">From forecast times</span>'}
+        </div>
+      </div>
+
+      <div class="kv">
+        <div class="kv-item"><div class="kv-k">Delay</div>
+          <div class="kv-v" style="color:${t.delay > 5 ? css('--bat-low') : css('--series-3')}">
+            ${t.delay == null ? '—' : (t.delay > 0 ? '+' : '') + t.delay + '<small>min</small>'}</div></div>
+        <div class="kv-item"><div class="kv-k">Along this leg</div>
+          <div class="kv-v">${pct}<small>%</small></div></div>
+      </div>
+
+      <div class="sub-head"><span>Current leg</span></div>
+      <div class="leg">
+        <div class="leg-end"><div class="leg-name">${t.from || '—'}</div>
+          <div class="leg-time">${t.leg_start ? fmtTime(t.leg_start) : ''}</div></div>
+        <div class="leg-bar"><div class="leg-fill" style="width:${pct}%"></div></div>
+        <div class="leg-end leg-right"><div class="leg-name">${t.to || '—'}</div>
+          <div class="leg-time">${t.leg_end ? fmtTime(t.leg_end) : ''}</div></div>
+      </div>
+
+      <p class="muted" style="margin-top:14px">
+        <strong>This position is an estimate.</strong> Realtime Trains publishes no
+        coordinates, so the train is placed by interpolating between its calling
+        points using ${t.basis === 'actual' ? 'the times it actually passed them' : 'forecast times'},
+        then ${t.on_track
+          ? 'snapping the result onto OpenStreetMap railway geometry'
+          : 'left unsnapped — no mapped track was near enough to be confident'}.
+        Accuracy depends on how far apart the calling points are: a train between
+        two distant ones can be a fair way off.
+      </p>
+    </div>`;
+  state.layers.trail.clearLayers();
+  state.map.flyTo([t.lat, t.lon], Math.max(state.map.getZoom(), 13), { duration: 0.6 });
 }
 
 async function selectStation(code) {
@@ -1226,6 +1324,10 @@ function wire() {
     if (e.target.checked) state.layers.vehicles.addTo(state.map);
     else state.map.removeLayer(state.layers.vehicles);
   });
+  $('#layerTrains').addEventListener('change', e => {
+    if (e.target.checked) { state.layers.trains.addTo(state.map); loadTrains(); }
+    else state.map.removeLayer(state.layers.trains);
+  });
   $('#layerRail').addEventListener('change', e => toggleLayer('rail', e.target.checked, loadRail));
   $('#layerStops').addEventListener('change', e => toggleLayer('stops', e.target.checked,
     l => loadInfrastructure(['bus_stop', 'bus_station'], l, 'bus stops')));
@@ -1271,6 +1373,7 @@ async function main() {
 
   await loadLive();
   loadBuses();
+  loadTrains();
   toggleLayer('rail', true, loadRail);
 
   if (h && h.polls <= 1) {
@@ -1279,6 +1382,7 @@ async function main() {
 
   setInterval(loadLive, 30000);
   setInterval(() => { if ($('#layerBuses').checked) loadBuses(); }, 45000);
+  setInterval(() => { if ($('#layerTrains').checked) loadTrains(); }, 60000);
   setInterval(loadHealth, 15000);
   setInterval(() => {
     if ($('#tab-analytics').classList.contains('is-active')) loadStats();

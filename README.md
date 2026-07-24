@@ -75,7 +75,7 @@ Three modes, three very different levels of availability. Measured, not assumed:
 | **Rail** | Live departure boards, delays, platforms, cancellations — but **no train positions** | Realtime Trains (token required) + OpenStreetMap for station coordinates |
 | **Ferry** | Pier positions only | OpenStreetMap |
 
-### Why trains are not dots on the map
+### How trains are placed on the map
 
 Realtime Trains returns rich live *timing* data: which services call where, forecast
 against schedule, delays, platforms, cancellations, operators and formation lengths. What
@@ -83,12 +83,35 @@ it does not return, anywhere, is a coordinate. Neither the service responses nor
 reference endpoints (`/data/stops`, `/data/locations_ungrouped`) carry a latitude or
 longitude — those return only codes and names.
 
-So a train cannot honestly be placed on a map from this feed, and Hush does not try.
-Instead **each station is live**: click one for its real departure board, with delays
-computed from actual forecasts. Station coordinates come from OpenStreetMap, matched to
-RTT station codes by name — 19 of Bristol's stations match, and the ones that do not are
-heritage lines (Avon Valley, the SS Great Britain railway) that are genuinely not on the
-national network.
+So train positions here are **reconstructed, not reported**, and the UI says so on every
+train. The method:
+
+1. Take the service's ordered calling points and their times, preferring
+   `realtimeActual` — the time a train genuinely passed a point — over a forecast.
+2. Find which leg *now* falls in: dwelling at a station, or running between two.
+3. Route between those two stations along real railway geometry — a graph of ~34,000
+   OpenStreetMap track segments, shortest path by Dijkstra — and place the train at the
+   right fraction *along that path*, not along a straight line.
+
+Step 3 is what makes it accurate. A straight line between distant stations can sit
+kilometres from the railway: the midpoint of Cheltenham Spa → Bristol Parkway is 2.6 km
+off the actual line. Routed, trains sit on the track — measured at 0 m for
+Salisbury → Warminster, Cheltenham → Parkway (62 km via Gloucester) and
+Weston Milton → Worle. The routing also sanity-checks against reality: Temple Meads →
+Lawrence Hill computes as 1.7 km, Temple Meads → Parkway as 9.4 km.
+
+Outside the track bounding box there is no geometry to route along, so those trains fall
+back to straight-line interpolation, are drawn with a dashed marker, and say in the panel
+that no mapped track was near enough to be confident.
+
+**The limits.** This is an estimate and only as good as the timings behind it. A train
+between two widely spaced calling points, or running to a stale forecast, will drift.
+Nothing here is GPS.
+
+Stations are matched from OpenStreetMap to RTT codes by name — 19 in the map area (used
+for boards) and ~330 across the wider region (used to give calling points coordinates).
+The Bristol-area stations that do not match are heritage lines — Avon Valley, the SS
+Great Britain railway — genuinely not on the national network.
 
 Rail is **off unless you supply a token**; nothing else changes when it is absent.
 
@@ -176,6 +199,9 @@ All optional, via environment variables or `.env`:
 | `HUSH_RAIL` | `1` | Set `0` to skip rail even with a token |
 | `HUSH_RAIL_INTERVAL` | `300` | Seconds between rail polls (one request per station) |
 | `HUSH_RAIL_RETAIN` | `259200` | How long rail service records are kept |
+| `HUSH_TRAIN_POSITIONS` | `1` | Set `0` to skip estimated train positions |
+| `HUSH_TRAIN_MAX` | `25` | Services positioned per cycle (one API request each) |
+| `HUSH_TRACK_SNAP_MAX` | `600` | Metres: reject a track snap further than this |
 
 Run the collector headless (no dashboard), or the dashboard against an existing database:
 
@@ -200,6 +226,7 @@ python3 -m hush.server --no-collector # serve only
 | `/api/infrastructure?kind=rail_station` | Stations, stops and piers |
 | `/api/rail` | Rail stations with live service counts and average delay |
 | `/api/rail/station/<code>` | One station's live departure board |
+| `/api/trains` | Estimated train positions with leg and progress |
 | `/api/leaderboard?hours=24` | Longest idle, flattest battery, fastest rented |
 | `/api/zones`, `/api/stations`, `/api/pricing` | Cached static feeds |
 

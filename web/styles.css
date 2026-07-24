@@ -193,6 +193,40 @@ input[type=range] { width: 100%; accent-color: var(--series-1); }
   border-width: 1.5px; border-color: var(--text-muted);
 }
 
+/* Trains: a carriage-like bar, distinct from the bus arrow, because these are
+   estimated positions rather than reported ones. */
+.train-icon { background: none; border: 0; }
+.train-mark {
+  width: 16px; height: 8px; margin-top: 4px;
+  border-radius: 3px;
+  border: 1.5px solid var(--surface-1);
+  box-sizing: border-box;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .25);
+}
+.train-mark.is-stopped { width: 10px; margin-left: 3px; opacity: .85; }
+/* Not snapped to mapped track: the estimate is looser, so say so visually. */
+.train-mark.is-offtrack { border-style: dashed; opacity: .75; }
+
+.legend-shape-train {
+  width: 14px; height: 7px; flex: 0 0 auto; border-radius: 2px;
+  background: var(--series-1); border: 1.5px solid var(--surface-1);
+}
+
+/* current-leg progress bar in the train detail panel */
+.leg { display: flex; align-items: center; gap: 9px; }
+.leg-end { min-width: 0; flex: 0 1 auto; }
+.leg-right { text-align: right; }
+.leg-name {
+  font-size: 11.5px; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px;
+}
+.leg-time { font-size: 10.5px; color: var(--text-muted); font-family: var(--mono); }
+.leg-bar {
+  flex: 1 1 auto; height: 4px; border-radius: 999px;
+  background: var(--surface-3); overflow: hidden; min-width: 40px;
+}
+.leg-fill { height: 100%; background: var(--series-1); border-radius: 999px; }
+
 .infra-mark.is-live { border-color: var(--series-3); border-width: 3px; }
 .infra-mark.is-late { border-color: var(--bat-low); border-width: 3px; }
 
