@@ -196,6 +196,149 @@ def _siri_text(block, tag):
     return m.group(1).strip() if m else None
 
 
+def poll_siri(conn=None):
+    """Fast path: Bristol-only positions from SIRI-VM, when a key is present.
+
+    The national GTFS-RT file is ~2 MB and covers the whole country; SIRI-VM
+    with a bounding box is a fifth of that and only Bristol, so it can be
+    polled far more often. It also carries the route number and bearing, so it
+    supersedes the GTFS-RT path entirely when a key is configured.
+    """
+    if not config.BODS_API_KEY:
+        return None
+    started = time.time()
+    now = int(started)
+    lo_la, lo_lo, hi_la, hi_lo = config.BBOX
+    url = (config.BODS_SIRI_URL + "?" + urllib.parse.urlencode({
+        "api_key": config.BODS_API_KEY,
+        "boundingBox": f"{lo_lo},{lo_la},{hi_lo},{hi_la}",
+    }))
+    try:
+        raw = _fetch(url, timeout=60).decode("utf-8", "replace")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"[transit] SIRI poll failed: {exc}", flush=True)
+        return None
+
+    records = []
+    for block in re.findall(r"<VehicleActivity>(.*?)</VehicleActivity>", raw, re.S):
+        vid = _siri_text(block, "VehicleRef")
+        la, lo = _siri_text(block, "Latitude"), _siri_text(block, "Longitude")
+        if not vid or la is None or lo is None:
+            continue
+        try:
+            lat, lon = float(la), float(lo)
+        except ValueError:
+            continue
+        brg = _siri_text(block, "Bearing")
+        try:
+            brg = float(brg) if brg is not None else None
+        except ValueError:
+            brg = None
+        records.append({
+            "vehicle_id": vid, "lat": lat, "lon": lon,
+            "bearing": brg if (brg is None or brg >= 0) else None,
+            "timestamp": _parse_siri_time(_siri_text(block, "RecordedAtTime")),
+            "line": _siri_text(block, "PublishedLineName") or _siri_text(block, "LineRef"),
+            "direction": _siri_text(block, "DirectionRef"),
+            "origin": (_siri_text(block, "OriginName") or "").replace("_", " ") or None,
+            "destination": (_siri_text(block, "DestinationName") or "").replace("_", " ") or None,
+            "journey": _siri_text(block, "DatedVehicleJourneyRef"),
+            "route_id": _siri_text(block, "LineRef"),
+        })
+    return _store(records, now, conn, source="siri",
+                  took_ms=int((time.time() - started) * 1000))
+
+
+def _parse_siri_time(value):
+    if not value:
+        return None
+    try:
+        return int(time.mktime(time.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _store(records, now, conn=None, source="siri", took_ms=0):
+    """Shared upsert for both feeds: positions, tracks and the sample row."""
+    conn = conn or db.connect()
+    prev = {r["vehicle_id"]: r for r in db.rows(
+        "SELECT vehicle_id, lat, lon, last_seen FROM transit_vehicles")}
+
+    rows, positions, speeds = [], [], []
+    routes, operators = set(), set()
+    fresh = 0
+
+    for r in records:
+        reported = r.get("timestamp")
+        if reported and now - reported > config.TRANSIT_MAX_AGE_S:
+            continue
+        fresh += 1
+        vid = r["vehicle_id"]
+        operator = _operator_of(vid)
+        if operator:
+            operators.add(operator)
+        if r.get("line"):
+            routes.add(r["line"])
+
+        speed, dist = None, 0.0
+        p = prev.get(vid)
+        if p and p["lat"] is not None:
+            dist = haversine_m(p["lat"], p["lon"], r["lat"], r["lon"])
+            gap = now - (p["last_seen"] or now)
+            if gap > 0 and dist > 5:
+                speed = (dist / 1000.0) / (gap / 3600.0)
+                if speed > 120:
+                    speed, dist = None, 0.0
+                else:
+                    speeds.append(speed)
+
+        rows.append((vid, operator, "bus", r.get("route_id"), r.get("journey"),
+                     None, r["lat"], r["lon"], r.get("bearing"), speed, reported,
+                     now, now, dist, r.get("line"), r.get("direction"),
+                     r.get("origin"), r.get("destination"), r.get("journey")))
+        positions.append((vid, now, r["lat"], r["lon"], r.get("bearing"), speed))
+
+    if not rows:
+        return {"ok": True, "live": 0}
+
+    conn.execute("BEGIN")
+    try:
+        conn.executemany(
+            "INSERT INTO transit_vehicles(vehicle_id, operator, mode, route_id, "
+            "trip_id, start_time, lat, lon, bearing, speed_kmh, reported_ts, "
+            "first_seen, last_seen, distance_m, line_name, direction, origin_name, "
+            "destination_name, journey_ref, fixes) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1) "
+            "ON CONFLICT(vehicle_id) DO UPDATE SET "
+            " operator=excluded.operator, route_id=excluded.route_id,"
+            " lat=excluded.lat, lon=excluded.lon, bearing=excluded.bearing,"
+            " speed_kmh=excluded.speed_kmh, reported_ts=excluded.reported_ts,"
+            " last_seen=excluded.last_seen,"
+            " distance_m=transit_vehicles.distance_m+excluded.distance_m,"
+            " line_name=COALESCE(excluded.line_name, transit_vehicles.line_name),"
+            " direction=COALESCE(excluded.direction, transit_vehicles.direction),"
+            " origin_name=COALESCE(excluded.origin_name, transit_vehicles.origin_name),"
+            " destination_name=COALESCE(excluded.destination_name, transit_vehicles.destination_name),"
+            " journey_ref=COALESCE(excluded.journey_ref, transit_vehicles.journey_ref),"
+            " fixes=transit_vehicles.fixes+1", rows)
+        conn.executemany(
+            "INSERT INTO transit_positions(vehicle_id, ts, lat, lon, bearing, speed_kmh) "
+            "VALUES(?,?,?,?,?,?)", positions)
+        conn.execute(
+            "INSERT OR REPLACE INTO transit_samples(ts, active, moving, operators, "
+            "routes, mean_speed_kmh, feed_age_s) VALUES(?,?,?,?,?,?,?)",
+            (now, fresh, sum(1 for s in speeds if s > 3), len(operators), len(routes),
+             (sum(speeds) / len(speeds)) if speeds else None, None))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    print(f"[transit] {time.strftime('%H:%M:%S')} {fresh} live via {source} "
+          f"({len(routes)} routes) {took_ms}ms", flush=True)
+    return {"ok": True, "live": fresh, "routes": len(routes)}
+
+
 def refresh_line_names(conn=None):
     if not config.BODS_API_KEY:
         return 0

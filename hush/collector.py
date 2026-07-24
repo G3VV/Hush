@@ -364,22 +364,39 @@ class Collector:
         interval = interval or config.POLL_INTERVAL_S
         print(f"[collector] polling {config.CITY} every {interval}s", flush=True)
         last_prune = 0
+        last_scooter = 0
         last_transit = 0
+        last_transit_wide = 0
+        last_transit_slow = 0
         last_rail = 0
         while True:
             cycle = time.time()
             try:
                 self.refresh_static()
-                self.poll()
+                if cycle - last_scooter >= interval:
+                    last_scooter = cycle
+                    self.poll()
                 # Public transport runs on its own, slower cadence: the BODS
                 # feed is a couple of megabytes and covers the whole country.
-                if config.TRANSIT_ENABLED and cycle - last_transit >= config.TRANSIT_POLL_INTERVAL_S:
-                    last_transit = cycle
+                if config.TRANSIT_ENABLED:
                     from . import transit
-                    transit.refresh_osm()
-                    transit.poll(self.conn)
-                    transit.refresh_line_names(self.conn)
-                    transit.refresh_route_shapes()
+                    fast = bool(config.BODS_API_KEY)
+                    # Two feeds, different jobs. SIRI is small and Bristol-only
+                    # so it runs often and keeps the moving vehicles current;
+                    # the national GTFS-RT file is large but catches vehicles
+                    # SIRI reports only rarely, so it runs slowly for coverage.
+                    if fast and cycle - last_transit >= config.TRANSIT_FAST_INTERVAL_S:
+                        last_transit = cycle
+                        transit.poll_siri(self.conn)
+                    if cycle - last_transit_wide >= config.TRANSIT_POLL_INTERVAL_S:
+                        last_transit_wide = cycle
+                        transit.poll(self.conn)
+                        if fast:
+                            transit.refresh_line_names(self.conn)
+                    if cycle - last_transit_slow >= 3600:
+                        last_transit_slow = cycle
+                        transit.refresh_osm()
+                        transit.refresh_route_shapes()
                 if (config.RAIL_ENABLED and config.RTT_TOKEN
                         and cycle - last_rail >= config.RAIL_POLL_INTERVAL_S):
                     last_rail = cycle
@@ -398,7 +415,10 @@ class Collector:
                     last_prune = cycle
             except Exception as exc:  # keep the loop alive across anything
                 print(f"[collector] unexpected error: {exc!r}", flush=True)
-            time.sleep(max(1.0, interval - (time.time() - cycle)))
+            # The loop ticks faster than the scooter poll so that transit,
+            # which refreshes far more often, is not held back by it.
+            tick = min(interval, config.TRANSIT_FAST_INTERVAL_S) if config.TRANSIT_ENABLED else interval
+            time.sleep(max(1.0, tick - (time.time() - cycle)))
 
 
 def main():

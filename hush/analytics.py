@@ -378,47 +378,77 @@ def transit_vehicle(vehicle_id, points=400):
     }
 
 
-def bus_path(vehicle_id, max_past=300):
-    """A bus's recorded track, and the road ahead from the timetable geometry.
+def bus_path(vehicle_id, max_past=400):
+    """A bus's journey: where it has been, and the road still ahead.
 
-    The past is measured -- positions we actually recorded. The future is the
-    remainder of the route alignment from the operator's own timetable, cut at
-    the point on the line nearest the vehicle. It is where the bus is routed to
-    go, not a prediction of where it will be when.
+    Raw GPS fixes make a poor line. Positions arrive every 30-120 seconds, so
+    consecutive fixes are hundreds of metres apart and a straight hop between
+    them cuts corners, crosses buildings and zigzags with GPS noise. Where we
+    hold the route alignment, each fix is projected onto it and the *route*
+    between the first and last projection is returned instead. That follows the
+    road exactly and is smooth by construction.
+
+    Without an alignment (no BODS key, or an unmatched line) it falls back to
+    the raw fixes, cleaned of noise.
     """
     v = db.one("SELECT vehicle_id, line_name, direction, lat, lon, destination_name "
                "FROM transit_vehicles WHERE vehicle_id=?", (vehicle_id,))
     if not v:
         return None
-    past = [[r["lat"], r["lon"]] for r in db.rows(
+
+    fixes = [(r["lat"], r["lon"]) for r in db.rows(
         "SELECT lat, lon FROM transit_positions WHERE vehicle_id=? "
         "ORDER BY ts DESC LIMIT ?", (vehicle_id, max_past))][::-1]
 
-    future, line = [], v["line_name"]
-    if line and v["lat"] is not None:
+    shape = None
+    if v["line_name"]:
         want = (v["direction"] or "").lower()
-        shapes = db.rows(
-            "SELECT direction, points FROM bus_routes WHERE line_name=?", (line,))
-        chosen = next((r for r in shapes if r["direction"] == want), None) or \
-            (shapes[0] if shapes else None)
+        rows = db.rows("SELECT direction, points FROM bus_routes WHERE line_name=?",
+                       (v["line_name"],))
+        chosen = next((r for r in rows if r["direction"] == want), None) or \
+            (rows[0] if rows else None)
         if chosen:
             pts = json.loads(chosen["points"] or "[]")
             if len(pts) > 1:
-                # Cut the alignment at the point nearest the bus.
-                best_i, best_d = 0, None
-                for i, (la, lo) in enumerate(pts):
-                    d = (la - v["lat"]) ** 2 + (lo - v["lon"]) ** 2
-                    if best_d is None or d < best_d:
-                        best_i, best_d = i, d
-                near_m = haversine_m(v["lat"], v["lon"], pts[best_i][0], pts[best_i][1])
-                # Too far from the alignment means the wrong variant; say nothing
-                # rather than draw a road the bus is not on.
-                if near_m <= 500:
-                    future = pts[best_i:]
+                shape = pts
+
+    past, future, snapped = [], [], False
+
+    if shape:
+        def nearest(lat, lon):
+            best_i, best_d = None, None
+            for i, (la, lo) in enumerate(shape):
+                d = (la - lat) ** 2 + (lo - lon) ** 2
+                if best_d is None or d < best_d:
+                    best_i, best_d = i, d
+            return best_i, haversine_m(lat, lon, shape[best_i][0], shape[best_i][1])
+
+        here_i, here_m = nearest(v["lat"], v["lon"]) if v["lat"] is not None else (None, None)
+        if here_i is not None and here_m <= 500:
+            snapped = True
+            future = shape[here_i:]
+            # Earliest fix that genuinely sits on this alignment marks the
+            # start of the run; anything further off is noise or another leg.
+            start_i = here_i
+            for la, lo in fixes:
+                i, m = nearest(la, lo)
+                if m <= 250 and i < start_i:
+                    start_i = i
+            past = shape[start_i:here_i + 1]
+
+    if not past:
+        # Fallback: drop fixes that barely moved, so noise does not zigzag.
+        cleaned = []
+        for pt in fixes:
+            if not cleaned or haversine_m(cleaned[-1][0], cleaned[-1][1], pt[0], pt[1]) > 15:
+                cleaned.append(pt)
+        past = [[a, b] for a, b in cleaned]
+
     return {
-        "id": v["vehicle_id"], "line": line,
+        "id": v["vehicle_id"], "line": v["line_name"],
         "direction": v["direction"], "destination": v["destination_name"],
         "past": past, "future": future,
+        "on_route": snapped, "fixes": len(fixes),
     }
 
 
@@ -584,8 +614,33 @@ def trains_live(max_age_s=1800):
             "on_track": r["snapped_m"] is not None,
             "age": now - r["computed_ts"],
             "leg_start": r["leg_start_ts"], "leg_end": r["leg_end_ts"],
+            # A decimated version of the leg the train is on. The client walks
+            # this by clock time between refreshes, so trains glide instead of
+            # jumping once a poll — and it stays consistent with the server,
+            # because both advance the same time-based model.
+            "leg": _leg_shape(r),
         })
     return out
+
+
+def _leg_shape(row, target=40):
+    """The current leg only, thinned to a handful of points."""
+    try:
+        past = json.loads(row["path_past"] or "[]")
+        future = json.loads(row["path_future"] or "[]")
+    except (TypeError, ValueError):
+        return []
+    # The leg spans the tail of past and the head of future.
+    tail = past[-target:] if past else []
+    head = future[:target] if future else []
+    pts = tail + head
+    if len(pts) <= target:
+        return pts
+    step = max(1, len(pts) // target)
+    thinned = pts[::step]
+    if thinned[-1] != pts[-1]:
+        thinned.append(pts[-1])
+    return thinned
 
 
 def train_path(uid):
