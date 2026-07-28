@@ -237,6 +237,30 @@
 
       <figure class="card">
         <figcaption>
+          <h3>Slowest routes</h3>
+          <p class="muted">Average speed while moving. A consistently slow route is a congested one.</p>
+        </figcaption>
+        <div class="chart" id="chartSlowRoutes"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Most buses running</h3>
+          <p class="muted">Vehicles currently live per route — a rough measure of frequency.</p>
+        </figcaption>
+        <div class="chart" id="chartBusyRoutes"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Traffic speed by hour</h3>
+          <p class="muted">Average bus speed across the network by hour of day. The dips are the city's rush hours.</p>
+        </figcaption>
+        <div class="chart" id="chartBusHour"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
           <h3>Bus speed</h3>
           <p class="muted">Derived between polls — the feed carries no speed field. Excludes stationary vehicles.</p>
         </figcaption>
@@ -277,6 +301,24 @@
           <p class="muted">Average delay in minutes across the services observed.</p>
         </figcaption>
         <div class="chart" id="chartRailOperators"></div>
+      </figure>
+    </div>
+
+    <div class="grid">
+      <figure class="card">
+        <figcaption>
+          <h3>Busiest stations</h3>
+          <p class="muted">Services seen calling, and how late they were running.</p>
+        </figcaption>
+        <div class="chart" id="chartStations"></div>
+      </figure>
+
+      <figure class="card">
+        <figcaption>
+          <h3>Delay by hour of day</h3>
+          <p class="muted">Average lateness by scheduled hour — when the network slips.</p>
+        </figcaption>
+        <div class="chart" id="chartRailHour"></div>
       </figure>
     </div>
 
