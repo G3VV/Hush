@@ -304,6 +304,8 @@ def overview(hours=24):
         },
         "transit": transit_overview(hours),
         "rail": rail_overview(hours),
+        "bus_insights": bus_insights(hours),
+        "rail_insights": rail_insights(hours),
     }
 
 
@@ -657,6 +659,106 @@ def train_path(uid):
         "past": json.loads(r["path_past"] or "[]"),
         "future": json.loads(r["path_future"] or "[]"),
         "calls": json.loads(r["calls"] or "[]"),
+    }
+
+
+def bus_insights(hours=24):
+    """Route-level statistics: congestion, frequency and bunching."""
+    from . import config
+    now = int(time.time())
+    since = now - hours * 3600
+    cutoff = now - config.TRANSIT_MAX_AGE_S
+
+    # Average speed per route. A consistently slow route is a congested one.
+    by_route = db.rows(
+        "SELECT v.line_name AS line, COUNT(*) AS fixes, "
+        "  AVG(p.speed_kmh) AS avg_kmh, MAX(p.speed_kmh) AS max_kmh "
+        "FROM transit_positions p JOIN transit_vehicles v USING (vehicle_id) "
+        "WHERE p.ts >= ? AND p.speed_kmh IS NOT NULL AND p.speed_kmh > 1 "
+        "  AND v.line_name IS NOT NULL "
+        "GROUP BY v.line_name HAVING fixes >= 3 ORDER BY avg_kmh ASC", (since,))
+    for r in by_route:
+        r["avg_kmh"] = round(r["avg_kmh"], 1)
+        r["max_kmh"] = round(r["max_kmh"], 1)
+
+    # Speed by hour of day: the shape of the city's congestion.
+    hod = [None] * 24
+    for r in db.rows(
+        "SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER) AS h, "
+        "AVG(speed_kmh) AS s FROM transit_positions "
+        "WHERE ts >= ? AND speed_kmh > 1 GROUP BY h", (since,)
+    ):
+        hod[r["h"]] = round(r["s"], 1)
+
+    # Bunching: two buses on the same route sitting almost on top of each
+    # other, which means a gap somewhere else. A classic sign of a route
+    # struggling, and visible from positions alone.
+    live = db.rows(
+        "SELECT vehicle_id, line_name, lat, lon FROM transit_vehicles "
+        "WHERE last_seen > ? AND line_name IS NOT NULL", (cutoff,))
+    groups = {}
+    for v in live:
+        groups.setdefault(v["line_name"], []).append(v)
+    bunched = []
+    for line, vs in groups.items():
+        for i in range(len(vs)):
+            for j in range(i + 1, len(vs)):
+                d = haversine_m(vs[i]["lat"], vs[i]["lon"], vs[j]["lat"], vs[j]["lon"])
+                if d < 300:
+                    bunched.append({"line": line, "metres": round(d),
+                                    "lat": vs[i]["lat"], "lon": vs[i]["lon"]})
+    bunched.sort(key=lambda b: b["metres"])
+
+    fleet_km = db.scalar("SELECT SUM(distance_m) FROM transit_vehicles", default=0) or 0
+    stopped = db.scalar(
+        "SELECT COUNT(*) FROM transit_vehicles WHERE last_seen > ? "
+        "AND (speed_kmh IS NULL OR speed_kmh <= 3)", (cutoff,), default=0)
+    active = db.scalar(
+        "SELECT COUNT(*) FROM transit_vehicles WHERE last_seen > ?", (cutoff,), default=0)
+
+    return {
+        "slowest_routes": by_route[:8],
+        "fastest_routes": list(reversed(by_route))[:8],
+        "busiest_routes": db.rows(
+            "SELECT line_name AS line, COUNT(*) AS buses FROM transit_vehicles "
+            "WHERE last_seen > ? AND line_name IS NOT NULL "
+            "GROUP BY line_name ORDER BY buses DESC LIMIT 8", (cutoff,)),
+        "speed_by_hour": hod,
+        "bunched": bunched[:10],
+        "bunched_count": len(bunched),
+        "fleet_km": round(fleet_km / 1000.0, 1),
+        "stopped": stopped,
+        "stopped_pct": round(100.0 * stopped / active, 1) if active else 0,
+        "routes_with_shapes": db.scalar(
+            "SELECT COUNT(DISTINCT line_name) FROM bus_routes", default=0),
+    }
+
+
+def rail_insights(hours=24):
+    """Station and timing patterns across the rail services observed."""
+    now = int(time.time())
+    since = now - hours * 3600
+    busiest = db.rows(
+        "SELECT s.name, v.station_code AS code, COUNT(*) AS services, "
+        "  ROUND(AVG(CASE WHEN v.is_cancelled=0 THEN v.delay_min END), 1) AS avg_delay "
+        "FROM rail_services v LEFT JOIN rail_stations s ON s.code = v.station_code "
+        "WHERE v.seen_ts >= ? GROUP BY v.station_code "
+        "ORDER BY services DESC LIMIT 10", (since,))
+    hod = [None] * 24
+    for r in db.rows(
+        "SELECT CAST(strftime('%H', scheduled_ts, 'unixepoch', 'localtime') AS INTEGER) AS h, "
+        "AVG(delay_min) AS d FROM rail_services "
+        "WHERE seen_ts >= ? AND delay_min IS NOT NULL AND is_cancelled = 0 "
+        "GROUP BY h", (since,)
+    ):
+        hod[r["h"]] = round(r["d"], 1)
+    return {
+        "busiest_stations": busiest,
+        "delay_by_hour": hod,
+        "destinations": db.rows(
+            "SELECT destination, COUNT(*) AS n FROM rail_services "
+            "WHERE seen_ts >= ? AND destination IS NOT NULL "
+            "GROUP BY destination ORDER BY n DESC LIMIT 8", (since,)),
     }
 
 

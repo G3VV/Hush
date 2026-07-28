@@ -95,7 +95,8 @@ def poll(conn=None):
 
     conn = conn or db.connect()
     prev = {r["vehicle_id"]: r for r in db.rows(
-        "SELECT vehicle_id, lat, lon, last_seen, distance_m, fixes FROM transit_vehicles")}
+        "SELECT vehicle_id, lat, lon, last_seen, reported_ts, distance_m, fixes "
+        "FROM transit_vehicles")}
 
     fresh, rows, positions = 0, [], []
     speeds, routes, operators = [], set(), set()
@@ -132,11 +133,17 @@ def poll(conn=None):
         dist = 0.0
         if p and p["lat"] is not None:
             dist = haversine_m(p["lat"], p["lon"], lat, lon)
-            gap = now - (p["last_seen"] or now)
-            if gap > 0 and dist > 5:
+            # Prefer the operator's own clock: positions can be minutes stale,
+            # and the poll interval is not the time the bus actually took.
+            gap = None
+            if reported and p["reported_ts"]:
+                gap = reported - p["reported_ts"]
+            if not gap or gap <= 0:
+                gap = now - (p["last_seen"] or now)
+            if gap and gap > 0 and dist > 5:
                 speed = (dist / 1000.0) / (gap / 3600.0)
                 # Anything above this is a GPS jump, not a bus.
-                if speed > 120:
+                if speed > 100:
                     speed, dist = None, 0.0
                 else:
                     speeds.append(speed)
@@ -262,7 +269,7 @@ def _store(records, now, conn=None, source="siri", took_ms=0):
     """Shared upsert for both feeds: positions, tracks and the sample row."""
     conn = conn or db.connect()
     prev = {r["vehicle_id"]: r for r in db.rows(
-        "SELECT vehicle_id, lat, lon, last_seen FROM transit_vehicles")}
+        "SELECT vehicle_id, lat, lon, last_seen, reported_ts FROM transit_vehicles")}
 
     rows, positions, speeds = [], [], []
     routes, operators = set(), set()
@@ -284,10 +291,18 @@ def _store(records, now, conn=None, source="siri", took_ms=0):
         p = prev.get(vid)
         if p and p["lat"] is not None:
             dist = haversine_m(p["lat"], p["lon"], r["lat"], r["lon"])
-            gap = now - (p["last_seen"] or now)
-            if gap > 0 and dist > 5:
+            # Elapsed time must come from the operator's own timestamps, not
+            # from our poll interval. A vehicle can report a position that is
+            # already minutes old, and dividing that distance by a 20-second
+            # poll gap invents speeds of 100 km/h for a city bus.
+            gap = None
+            if reported and p["reported_ts"]:
+                gap = reported - p["reported_ts"]
+            if not gap or gap <= 0:
+                gap = now - (p["last_seen"] or now)
+            if gap and gap > 0 and dist > 5:
                 speed = (dist / 1000.0) / (gap / 3600.0)
-                if speed > 120:
+                if speed > 100:          # not a bus: a jump or a bad clock
                     speed, dist = None, 0.0
                 else:
                     speeds.append(speed)

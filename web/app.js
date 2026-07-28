@@ -1270,6 +1270,8 @@ function renderStats(s) {
 
   renderTransit(s.transit || {});
   renderRail(s.rail || {});
+  renderBusInsights(s.bus_insights || {});
+  renderRailInsights(s.rail_insights || {});
 
   barChart($('#chartDwell'),
     ['<15m', '15–30m', '30–60m', '1–2h', '2–4h', '4–8h', '8–24h', '24h+']
@@ -1377,6 +1379,62 @@ function renderRail(r) {
             ${w.delay_min > 0 ? '+' : ''}${w.delay_min} min</td>
         </tr>`).join('') + `</tbody></table>`
     : `<div class="empty" style="margin:16px">Nothing delayed right now.</div>`;
+}
+
+function renderBusInsights(b) {
+  /* Slow routes are the interesting end, so they get the alert colour only
+     where the speed is genuinely poor rather than by rank. */
+  barChart($('#chartSlowRoutes'),
+    (b.slowest_routes || []).map(r => ({
+      label: `Route ${r.line} · ${r.fixes} samples`, short: r.line, value: r.avg_kmh,
+      color: r.avg_kmh < 12 ? css('--bat-low') : css('--bus-body'),
+    })),
+    { unit: 'km/h average', maxBar: 46,
+      empty: 'Needs a few minutes of moving buses — overnight almost nothing is running.' });
+
+  barChart($('#chartBusyRoutes'),
+    (b.busiest_routes || []).map(r => ({
+      label: `Route ${r.line}`, short: r.line, value: r.buses, color: css('--bus-body'),
+    })),
+    { unit: 'buses live', maxBar: 46, empty: 'No routes reporting right now.' });
+
+  const hod = b.speed_by_hour || [];
+  barChart($('#chartBusHour'),
+    hod.map((v, i) => ({ label: pad(i) + ':00', short: i % 3 === 0 ? pad(i) : '', value: v || 0 })),
+    { unit: 'km/h', empty: 'Fills in as the collector spans more of the day.' });
+
+  /* Bunching is a headline number, so it goes in the transit tile row. */
+  const tiles = $('#transitTiles');
+  if (tiles && b.fleet_km != null) {
+    tiles.insertAdjacentHTML('beforeend',
+      `<div class="tile"><div class="tile-k">Bunched pairs</div>
+         <div class="tile-v">${fmtNum(b.bunched_count || 0)}</div>
+         <div class="tile-sub">same route, under 300 m apart</div></div>
+       <div class="tile"><div class="tile-k">Standing still</div>
+         <div class="tile-v">${b.stopped_pct}<small>%</small></div>
+         <div class="tile-sub">${fmtNum(b.stopped)} of the live fleet</div></div>
+       <div class="tile"><div class="tile-k">Distance tracked</div>
+         <div class="tile-v">${fmtNum(b.fleet_km, 0)}<small>km</small></div>
+         <div class="tile-sub">by buses since collecting began</div></div>`);
+  }
+}
+
+function renderRailInsights(r) {
+  barChart($('#chartStations'),
+    (r.busiest_stations || []).map(s => ({
+      label: `${s.name || s.code}${s.avg_delay != null ? ' · avg ' + s.avg_delay + ' min' : ''}`,
+      short: s.code, value: s.services,
+      color: (s.avg_delay || 0) > 5 ? css('--bat-low') : css('--series-3'),
+    })),
+    { unit: 'services', maxBar: 46, empty: 'No services on the boards — nothing runs overnight.' });
+
+  const hod = r.delay_by_hour || [];
+  barChart($('#chartRailHour'),
+    hod.map((v, i) => ({
+      label: pad(i) + ':00', short: i % 3 === 0 ? pad(i) : '', value: v || 0,
+      color: (v || 0) > 5 ? css('--bat-low') : css('--series-3'),
+    })),
+    { unit: 'min average delay', empty: 'Needs services across more of the day.' });
 }
 
 /* ── fleet table ────────────────────────────────────────────────────── */
